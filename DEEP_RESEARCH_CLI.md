@@ -93,6 +93,15 @@ cd /home/ubuntu/open_deep_research
 
 The default JSONL index is `/home/ubuntu/.open_deep_research/runs.jsonl`. The default artifact directory is `/home/ubuntu/.open_deep_research/artifacts/`. The index is intentionally append-only so real usage can be sampled later for evaluation and regression cases.
 
+Run the local baseline checks against persisted runs:
+
+```bash
+cd /home/ubuntu/open_deep_research
+.venv/bin/python scripts/evaluate_local_runs.py --limit 50
+```
+
+The baseline definition lives at `tests/baselines/deep_research_cli_baseline.json`. It checks evidence coverage, citation host preservation, freshness signals for time-sensitive cases, and a small hallucination/placeholder phrase blocklist.
+
 `--mode direct` runs the Open Deep Research researcher subgraph directly and is the current MVP path. `--mode full` runs the full supervisor graph; with DeepSeek it may require more prompt/model tuning to reliably delegate tool-backed research.
 
 Next provider upgrades are tracked in `DEEP_RESEARCH_TODO.md`: paid public web search, MaxHub vertical sources, Sogou WeChat MCP fallback, and Hermes packaging.

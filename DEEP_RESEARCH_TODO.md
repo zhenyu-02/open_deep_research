@@ -58,6 +58,6 @@
 
 - [x] Add local persistence for every run: question, config/search_api, raw notes, final report path, timestamps, model, stats, and errors. Current implementation uses append-only JSONL at `~/.open_deep_research/runs.jsonl` plus report/raw-note artifacts under `~/.open_deep_research/artifacts/`; normalized evidence records remain a follow-up when provider outputs are split into structured artifacts.
 - [x] Add a run index/list command so one week/month of usage can be reviewed and sampled. Current CLI supports `--list-runs --limit N`.
-- [ ] Define an evaluation baseline: seeded questions, expected evidence coverage, citation correctness, source freshness, and hallucination checks.
+- [x] Define an evaluation baseline: seeded questions, expected evidence coverage, citation correctness, source freshness, and hallucination checks. Current baseline lives in `tests/baselines/deep_research_cli_baseline.json`; local checker is `scripts/evaluate_local_runs.py`.
 - [ ] Build a regression test set from accumulated real cases after enough usage.
 - [ ] Add simple quality checks using DeepSeek Flash or equivalent cheap model for evidence/report consistency.

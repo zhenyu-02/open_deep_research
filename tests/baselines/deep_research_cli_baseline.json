@@ -1,0 +1,114 @@
+{
+  "version": 1,
+  "description": "Local CLI regression baseline for persisted Open Deep Research runs.",
+  "metrics": {
+    "evidence_coverage": "Report and raw notes should include required evidence keywords/hosts for the matched case.",
+    "citation_correctness": "Report should include URL-like citations and preserve required source hosts when configured.",
+    "source_freshness": "Provider metadata or report text should include date-like evidence when the case requires freshness.",
+    "hallucination_smoke": "Report should not contain common unsupported/placeholder source language. LLM groundedness checks remain a later layer."
+  },
+  "cases": [
+    {
+      "id": "seeded_open_deep_research_repo",
+      "search_api": "seeded_web",
+      "question_contains_any": [
+        "Open Deep Research",
+        "open_deep_research",
+        "LangChain Open Deep Research"
+      ],
+      "required_hosts": [
+        "github.com"
+      ],
+      "required_report_terms": [
+        "Open Deep Research",
+        "configuration",
+        "search"
+      ],
+      "required_raw_note_terms": [
+        "github.com/langchain-ai/open_deep_research"
+      ],
+      "min_report_urls": 1,
+      "requires_freshness_signal": false
+    },
+    {
+      "id": "tavily_public_web_project_status",
+      "search_api": "tavily",
+      "question_contains_any": [
+        "recent project status",
+        "live web search",
+        "LangChain Open Deep Research"
+      ],
+      "required_hosts": [
+        "github.com"
+      ],
+      "required_report_terms": [
+        "architecture",
+        "configuration",
+        "limitations"
+      ],
+      "required_raw_note_terms": [
+        "SOURCE",
+        "URL:"
+      ],
+      "min_report_urls": 2,
+      "requires_freshness_signal": true
+    },
+    {
+      "id": "wechat_sogou_deepseek_rumors",
+      "search_api": "wechat_sogou",
+      "question_contains_any": [
+        "DeepSeek V4",
+        "微信公众号",
+        "峰谷定价"
+      ],
+      "required_hosts": [
+        "mp.weixin.qq.com"
+      ],
+      "required_report_terms": [
+        "DeepSeek",
+        "来源",
+        "限制"
+      ],
+      "required_raw_note_terms": [
+        "PLATFORM: wechat_official_account",
+        "mp.weixin.qq.com"
+      ],
+      "min_report_urls": 1,
+      "requires_freshness_signal": true
+    },
+    {
+      "id": "maxhub_vertical_xiaohongshu_or_zhihu",
+      "search_api": "maxhub",
+      "question_contains_any": [
+        "小红书",
+        "Xiaohongshu",
+        "知乎",
+        "Zhihu"
+      ],
+      "required_hosts": [
+        "xiaohongshu.com",
+        "zhihu.com",
+        "zhuanlan.zhihu.com"
+      ],
+      "required_report_terms": [
+        "source",
+        "platform",
+        "evidence"
+      ],
+      "required_raw_note_terms": [
+        "NORMALIZED_RECORD",
+        "PLATFORM:"
+      ],
+      "min_report_urls": 1,
+      "requires_freshness_signal": false
+    }
+  ],
+  "hallucination_smoke_blocklist": [
+    "as an ai language model",
+    "i cannot access",
+    "source needed",
+    "citation needed",
+    "example.com",
+    "placeholder"
+  ]
+}
