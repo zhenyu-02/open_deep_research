@@ -3,11 +3,15 @@
 import asyncio
 import logging
 import os
+import re
 import warnings
+from base64 import urlsafe_b64decode
 from datetime import datetime, timedelta, timezone
+from urllib.parse import parse_qs, urljoin, urlparse
 from typing import Annotated, Any, Dict, List, Literal, Optional
 
 import aiohttp
+import requests
 from langchain.chat_models import init_chat_model
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import (
@@ -28,10 +32,700 @@ from langchain_mcp_adapters.client import MultiServerMCPClient
 from langgraph.config import get_store
 from mcp import McpError
 from tavily import AsyncTavilyClient
+from duckduckgo_search import DDGS
 
 from open_deep_research.configuration import Configuration, SearchAPI
 from open_deep_research.prompts import summarize_webpage_prompt
 from open_deep_research.state import ResearchComplete, Summary
+
+##########################
+# DuckDuckGo Search Tool Utils
+##########################
+DUCKDUCKGO_SEARCH_DESCRIPTION = (
+    "A public web search tool backed by DuckDuckGo. Useful for key public web "
+    "results when a dedicated paid search API key is not configured."
+)
+
+
+def _duckduckgo_search_sync(queries: List[str], max_results: int) -> list[dict[str, Any]]:
+    """Run DuckDuckGo searches synchronously for use from an async tool."""
+    responses = []
+    with DDGS() as ddgs:
+        for query in queries:
+            results = list(ddgs.text(query, max_results=max_results))
+            responses.append({"query": query, "results": results})
+    return responses
+
+
+@tool(description=DUCKDUCKGO_SEARCH_DESCRIPTION)
+async def duckduckgo_search(
+    queries: List[str],
+    max_results: Annotated[int, InjectedToolArg] = 5,
+    config: RunnableConfig = None,
+) -> str:
+    """Fetch public web search results from DuckDuckGo.
+
+    Args:
+        queries: List of search queries to execute.
+        max_results: Maximum number of results to return per query.
+        config: Runtime configuration, unused for DuckDuckGo.
+
+    Returns:
+        Formatted string containing public web search results.
+    """
+    try:
+        search_results = await asyncio.to_thread(
+            _duckduckgo_search_sync, queries, max_results
+        )
+    except Exception as e:
+        return f"DuckDuckGo search failed: {e}"
+
+    unique_results = {}
+    for response in search_results:
+        for result in response["results"]:
+            url = result.get("href") or result.get("url")
+            if not url or url in unique_results:
+                continue
+            unique_results[url] = {
+                "query": response["query"],
+                "title": result.get("title", "Untitled"),
+                "content": result.get("body", ""),
+            }
+
+    if not unique_results:
+        return "No valid search results found. Please try different search queries."
+
+    formatted_output = "Search results:\n\n"
+    for i, (url, result) in enumerate(unique_results.items()):
+        formatted_output += f"--- SOURCE {i + 1}: {result['title']} ---\n"
+        formatted_output += f"URL: {url}\n"
+        formatted_output += f"QUERY: {result['query']}\n\n"
+        formatted_output += f"SNIPPET:\n{result['content']}\n\n"
+        formatted_output += "-" * 80 + "\n\n"
+
+    return formatted_output
+
+##########################
+# Bing Web Search Tool Utils
+##########################
+BING_WEB_SEARCH_DESCRIPTION = (
+    "A public web search fallback backed by Bing HTML results. Useful for smoke "
+    "tests when no dedicated search API key is configured."
+)
+
+
+def _decode_bing_url(url: str) -> str:
+    """Best-effort decode for Bing redirect URLs."""
+    parsed = urlparse(url)
+    if parsed.netloc.endswith("bing.com") and parsed.path.startswith("/ck/"):
+        encoded = parse_qs(parsed.query).get("u", [None])[0]
+        if encoded:
+            try:
+                if encoded.startswith("a1"):
+                    encoded = encoded[2:]
+                padding = "=" * (-len(encoded) % 4)
+                return urlsafe_b64decode(encoded + padding).decode("utf-8")
+            except Exception:
+                return url
+    return url
+
+
+def _bing_web_search_sync(queries: List[str], max_results: int) -> list[dict[str, Any]]:
+    """Run Bing HTML searches synchronously for use from an async tool."""
+    responses = []
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+        )
+    }
+    for query in queries:
+        response = requests.get(
+            "https://www.bing.com/search",
+            params={"q": query},
+            headers=headers,
+            timeout=20,
+        )
+        response.raise_for_status()
+        from bs4 import BeautifulSoup
+
+        soup = BeautifulSoup(response.text, "html.parser")
+        results = []
+        for item in soup.select("li.b_algo")[:max_results]:
+            link = item.find("a")
+            if not link or not link.get("href"):
+                continue
+            snippet = item.find("p")
+            results.append({
+                "title": link.get_text(" ", strip=True),
+                "href": _decode_bing_url(link["href"]),
+                "body": snippet.get_text(" ", strip=True) if snippet else "",
+            })
+        responses.append({"query": query, "results": results})
+    return responses
+
+
+@tool(description=BING_WEB_SEARCH_DESCRIPTION)
+async def bing_web_search(
+    queries: List[str],
+    max_results: Annotated[int, InjectedToolArg] = 5,
+    config: RunnableConfig = None,
+) -> str:
+    """Fetch public web search results from Bing HTML search."""
+    try:
+        search_results = await asyncio.to_thread(
+            _bing_web_search_sync, queries, max_results
+        )
+    except Exception as e:
+        return f"Bing web search failed: {e}"
+
+    unique_results = {}
+    for response in search_results:
+        for result in response["results"]:
+            url = result.get("href")
+            if not url or url in unique_results:
+                continue
+            unique_results[url] = {
+                "query": response["query"],
+                "title": result.get("title", "Untitled"),
+                "content": result.get("body", ""),
+            }
+
+    if not unique_results:
+        return "No valid search results found. Please try different search queries."
+
+    formatted_output = "Search results:\n\n"
+    for i, (url, result) in enumerate(unique_results.items()):
+        formatted_output += f"--- SOURCE {i + 1}: {result['title']} ---\n"
+        formatted_output += f"URL: {url}\n"
+        formatted_output += f"QUERY: {result['query']}\n\n"
+        formatted_output += f"SNIPPET:\n{result['content']}\n\n"
+        formatted_output += "-" * 80 + "\n\n"
+
+    return formatted_output
+
+##########################
+# Seeded Web Source Tool Utils
+##########################
+SEEDED_WEB_SEARCH_DESCRIPTION = (
+    "Read explicitly provided public web URLs and return their extracted text. "
+    "Use this when source URLs are already supplied by the caller."
+)
+
+
+def _jina_reader_url(url: str) -> str:
+    """Build a Jina Reader URL for a public page."""
+    return "https://r.jina.ai/http://" + url
+
+
+def _seeded_web_fetch_sync(urls: List[str], max_chars_per_url: int) -> list[dict[str, str]]:
+    """Fetch public URLs through Jina Reader."""
+    docs = []
+    headers = {"User-Agent": "open-deep-research-cli/0.1"}
+    for url in urls:
+        response = requests.get(_jina_reader_url(url), headers=headers, timeout=30)
+        response.raise_for_status()
+        docs.append({"url": url, "content": response.text[:max_chars_per_url]})
+    return docs
+
+
+@tool(description=SEEDED_WEB_SEARCH_DESCRIPTION)
+async def seeded_web_search(
+    queries: List[str],
+    max_results: Annotated[int, InjectedToolArg] = 5,
+    config: RunnableConfig = None,
+) -> str:
+    """Fetch caller-provided public web URLs and return source text."""
+    source_urls = (config or {}).get("configurable", {}).get("source_urls", [])
+    if not source_urls:
+        return "No source URLs configured. Pass --source-url in the CLI."
+
+    try:
+        docs = await asyncio.to_thread(_seeded_web_fetch_sync, source_urls, 12000)
+    except Exception as e:
+        return f"Seeded web fetch failed: {e}"
+
+    formatted_output = "Seeded public web sources:\n\n"
+    for i, doc in enumerate(docs[:max_results]):
+        formatted_output += f"--- SOURCE {i + 1} ---\n"
+        formatted_output += f"URL: {doc['url']}\n\n"
+        formatted_output += f"CONTENT:\n{doc['content']}\n\n"
+        formatted_output += "-" * 80 + "\n\n"
+    return formatted_output
+
+
+##########################
+# MaxHub Vertical Search Tool Utils
+##########################
+MAXHUB_SEARCH_DESCRIPTION = (
+    "Search Chinese vertical sources through MaxHub and return normalized "
+    "records with title/url/snippet/content/source/platform/media/images/raw. "
+    "The MVP supports Xiaohongshu notes and Zhihu article/question search."
+)
+MAXHUB_BASE_URL = "https://www.aconfig.cn"
+
+
+def _strip_html(value: Any) -> str:
+    if value is None:
+        return ""
+    text = str(value)
+    if "<" not in text:
+        return text.strip()
+    from bs4 import BeautifulSoup
+
+    return BeautifulSoup(text, "html.parser").get_text(" ", strip=True)
+
+
+def _compact_text(*values: Any, limit: int = 1200) -> str:
+    parts = [_strip_html(value) for value in values if _strip_html(value)]
+    return "\n".join(parts)[:limit]
+
+
+def _maxhub_api_key(config: RunnableConfig = None) -> str | None:
+    if os.getenv("GET_API_KEYS_FROM_CONFIG", "false").lower() == "true":
+        return (config or {}).get("configurable", {}).get("apiKeys", {}).get("MAXHUB_API_KEY")
+    return os.getenv("MAXHUB_API_KEY")
+
+
+def _maxhub_get(endpoint: str, params: dict[str, Any], config: RunnableConfig = None) -> dict[str, Any]:
+    api_key = _maxhub_api_key(config)
+    if not api_key:
+        raise ValueError("MAXHUB_API_KEY is not configured. Add it to ~/.hermes/.env.")
+    response = requests.get(
+        f"{MAXHUB_BASE_URL}{endpoint}",
+        params=params,
+        headers={"Authorization": f"Bearer {api_key}"},
+        timeout=30,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    code = payload.get("code") or payload.get("detail", {}).get("code")
+    if code and int(code) != 200:
+        detail = payload.get("detail") or payload
+        raise RuntimeError(detail.get("message_zh") or detail.get("message") or str(detail))
+    return payload
+
+
+def _xhs_note_url(note: dict[str, Any]) -> str:
+    note_id = note.get("id") or note.get("note_id") or note.get("noteId") or ""
+    xsec_token = note.get("xsec_token") or note.get("xsecToken") or ""
+    if not note_id:
+        return note.get("url") or note.get("share_url") or ""
+    url = f"https://www.xiaohongshu.com/explore/{note_id}"
+    if xsec_token:
+        url += f"?xsec_token={xsec_token}"
+    return url
+
+
+def _normalize_xhs(payload: dict[str, Any], query: str, limit: int) -> list[dict[str, Any]]:
+    data = payload.get("data", {}).get("data", payload.get("data", {}))
+    items = data.get("items") if isinstance(data, dict) else []
+    normalized = []
+    for item in (items or [])[:limit]:
+        note = item.get("note", item) if isinstance(item, dict) else {}
+        if not isinstance(note, dict):
+            continue
+        images = []
+        for image in note.get("images_list") or note.get("images") or []:
+            if isinstance(image, dict):
+                image_url = image.get("url") or image.get("url_size_large") or image.get("original")
+                if image_url:
+                    images.append(image_url)
+            elif image:
+                images.append(str(image))
+        author = note.get("user", {}) or note.get("author", {}) or item.get("user", {}) or {}
+        title = _strip_html(note.get("title") or note.get("display_title") or note.get("desc"))
+        content = _compact_text(note.get("desc"), note.get("content"))
+        normalized.append({
+            "title": title or "Untitled Xiaohongshu note",
+            "url": _xhs_note_url(note),
+            "snippet": content or title,
+            "content": content,
+            "source": "maxhub",
+            "platform": "xiaohongshu",
+            "media": {
+                "type": note.get("type") or note.get("model_type") or item.get("model_type"),
+                "author": author.get("nickname") or author.get("name"),
+                "author_id": author.get("user_id") or author.get("id"),
+                "liked_count": note.get("liked_count"),
+                "collected_count": note.get("collected_count"),
+                "comments_count": note.get("comments_count"),
+                "shared_count": note.get("shared_count"),
+                "query": query,
+            },
+            "images": images,
+            "raw": item,
+        })
+    return normalized
+
+
+def _zhihu_url(obj: dict[str, Any]) -> str:
+    url = obj.get("url") or ""
+    obj_type = obj.get("type") or ""
+    obj_id = str(obj.get("id") or "")
+    if "api.zhihu.com/questions/" in url or obj_type == "question":
+        return f"https://www.zhihu.com/question/{obj_id}" if obj_id else url
+    if "api.zhihu.com/answers/" in url or obj_type == "answer":
+        return f"https://www.zhihu.com/question/{obj.get('question', {}).get('id', '')}/answer/{obj_id}" if obj_id else url
+    if obj_type == "article" and obj_id:
+        return f"https://zhuanlan.zhihu.com/p/{obj_id}"
+    return url
+
+
+def _normalize_zhihu_object(obj: dict[str, Any], item: dict[str, Any], query: str) -> dict[str, Any] | None:
+    if not isinstance(obj, dict):
+        return None
+    title = _strip_html(obj.get("title") or obj.get("question", {}).get("title") or obj.get("name"))
+    snippet = _compact_text(obj.get("description"), obj.get("excerpt"), obj.get("content"))
+    if not title and not snippet:
+        return None
+    url = _zhihu_url(obj)
+    if not url and (obj.get("type") or item.get("type")) in {"hot_timing"}:
+        return None
+    images = []
+    thumb_info = obj.get("thumbnail_info") or {}
+    for thumb in thumb_info.get("thumbnails") or []:
+        if isinstance(thumb, dict) and thumb.get("url"):
+            images.append(thumb["url"])
+    return {
+        "title": title or snippet[:80] or "Untitled Zhihu result",
+        "url": url,
+        "snippet": snippet,
+        "content": snippet,
+        "source": "maxhub",
+        "platform": "zhihu",
+        "media": {
+            "type": obj.get("type") or item.get("type"),
+            "author": (obj.get("author") or {}).get("name"),
+            "author_id": (obj.get("author") or {}).get("url_token"),
+            "voteup_count": obj.get("voteup_count"),
+            "comment_count": obj.get("comment_count"),
+            "follower_count": obj.get("follower_count"),
+            "answer_count": obj.get("answer_count"),
+            "visits_count": obj.get("visits_count"),
+            "updated_time": obj.get("updated_time"),
+            "query": query,
+        },
+        "images": images,
+        "raw": item,
+    }
+
+
+def _normalize_zhihu(payload: dict[str, Any], query: str, limit: int) -> list[dict[str, Any]]:
+    items = payload.get("data", {}).get("data", [])
+    normalized = []
+    for item in items or []:
+        obj = item.get("object", item) if isinstance(item, dict) else {}
+        candidate = _normalize_zhihu_object(obj, item, query)
+        if candidate:
+            normalized.append(candidate)
+        for content_item in item.get("content_items") or obj.get("content_items") or []:
+            nested = _normalize_zhihu_object(content_item.get("object", content_item), item, query)
+            if nested:
+                normalized.append(nested)
+        if len(normalized) >= limit:
+            break
+    return normalized[:limit]
+
+
+def _maxhub_search_sync(query: str, platforms: list[str], max_results: int, config: RunnableConfig = None) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    if "xiaohongshu" in platforms:
+        payload = _maxhub_get(
+            "/api/v1/xiaohongshu/app_v2/search_notes",
+            {"keyword": query, "page": 1, "sort_type": "general"},
+            config,
+        )
+        records.extend(_normalize_xhs(payload, query, max_results))
+    if "zhihu" in platforms:
+        payload = _maxhub_get(
+            "/api/v1/zhihu/web/fetch_article_search_v3",
+            {"keyword": query, "offset": 0, "limit": max_results},
+            config,
+        )
+        records.extend(_normalize_zhihu(payload, query, max_results))
+    return records
+
+
+@tool(description=MAXHUB_SEARCH_DESCRIPTION)
+async def maxhub_search(
+    queries: List[str],
+    max_results: Annotated[int, InjectedToolArg] = 5,
+    config: RunnableConfig = None,
+) -> str:
+    """Fetch MaxHub vertical search results and return normalized records."""
+    platforms = (config or {}).get("configurable", {}).get("maxhub_platforms") or [
+        "xiaohongshu",
+        "zhihu",
+    ]
+    valid_platforms = [p for p in platforms if p in {"xiaohongshu", "zhihu"}]
+    if not valid_platforms:
+        return "No valid MaxHub platforms configured. Use xiaohongshu and/or zhihu."
+
+    all_records = []
+    for query in queries:
+        try:
+            records = await asyncio.to_thread(
+                _maxhub_search_sync,
+                query,
+                valid_platforms,
+                max_results,
+                config,
+            )
+            all_records.extend(records)
+        except Exception as e:  # noqa: BLE001 - tool output should carry provider failures
+            all_records.append({
+                "title": f"MaxHub search failed for {query}",
+                "url": "",
+                "snippet": str(e),
+                "content": "",
+                "source": "maxhub",
+                "platform": ",".join(valid_platforms),
+                "media": {"query": query, "error": str(e)},
+                "images": [],
+                "raw": {},
+            })
+
+    if not all_records:
+        return "No valid MaxHub results found. Try a different query."
+
+    formatted_output = "MaxHub normalized search results:\n\n"
+    for i, record in enumerate(all_records[: max_results * max(1, len(queries)) * len(valid_platforms)]):
+        formatted_output += f"--- SOURCE {i + 1}: {record['title']} ---\n"
+        formatted_output += f"URL: {record['url']}\n"
+        formatted_output += f"SOURCE: {record['source']}\n"
+        formatted_output += f"PLATFORM: {record['platform']}\n"
+        formatted_output += f"SNIPPET: {record['snippet']}\n"
+        formatted_output += f"IMAGES: {len(record['images'])}\n"
+        formatted_output += f"MEDIA: {record['media']}\n\n"
+        formatted_output += f"NORMALIZED_RECORD:\n{record}\n"
+        formatted_output += "-" * 80 + "\n\n"
+    return formatted_output
+
+
+##########################
+# WeChat Official Account Search via Sogou
+##########################
+WECHAT_SOGOU_SEARCH_DESCRIPTION = (
+    "Search WeChat official account articles through Sogou Weixin search. "
+    "Returns normalized records with title/url/snippet/content/source/platform/media/images/raw. "
+    "This provider does not use MaxHub."
+)
+SOGOU_WECHAT_BASE_URL = "https://weixin.sogou.com"
+
+
+def _sogou_wechat_headers() -> dict[str, str]:
+    return {
+        "User-Agent": (
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Referer": "https://weixin.sogou.com/",
+    }
+
+
+def _sogou_clean_text(value: Any) -> str:
+    return " ".join(_strip_html(value).split())
+
+
+def _sogou_time_to_date(raw: str | None) -> str:
+    if not raw:
+        return ""
+    try:
+        return datetime.fromtimestamp(int(raw)).strftime("%Y-%m-%d")
+    except Exception:
+        return str(raw)
+
+
+def _resolve_sogou_wechat_url(href: str) -> str:
+    if not href:
+        return ""
+    absolute_url = urljoin(SOGOU_WECHAT_BASE_URL, href)
+    if "mp.weixin.qq.com" in absolute_url:
+        return absolute_url
+    try:
+        response = requests.get(
+            absolute_url,
+            headers=_sogou_wechat_headers(),
+            timeout=20,
+            allow_redirects=False,
+        )
+        location = response.headers.get("location")
+        if location:
+            return urljoin(absolute_url, location)
+        if "mp.weixin.qq.com" in response.url:
+            return response.url
+        parts = re.findall(r"url\s*\+=\s*'([^']*)'", response.text)
+        if parts:
+            return "".join(parts).replace("@", "")
+    except Exception:
+        return absolute_url
+    return absolute_url
+
+
+def _fetch_wechat_article(url: str) -> dict[str, Any]:
+    if not url or "mp.weixin.qq.com" not in url:
+        return {}
+    try:
+        response = requests.get(
+            url,
+            headers={**_sogou_wechat_headers(), "Referer": SOGOU_WECHAT_BASE_URL + "/"},
+            timeout=25,
+        )
+        response.raise_for_status()
+    except Exception as exc:
+        return {"error": str(exc)}
+
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(response.text, "html.parser")
+    title_node = soup.select_one("#activity-name") or soup.select_one("meta[property='og:title']")
+    author_node = soup.select_one("#js_name")
+    content_node = soup.select_one("#js_content")
+    image_nodes = content_node.select("img") if content_node else []
+    images = []
+    for image in image_nodes:
+        image_url = image.get("data-src") or image.get("src")
+        if image_url:
+            images.append(image_url)
+    return {
+        "title": title_node.get_text(" ", strip=True) if title_node and hasattr(title_node, "get_text") else (title_node.get("content", "") if title_node else ""),
+        "author": author_node.get_text(" ", strip=True) if author_node else "",
+        "content": content_node.get_text("\n", strip=True) if content_node else "",
+        "images": images,
+        "raw_html_length": len(response.text),
+    }
+
+
+def _parse_sogou_wechat_html(html: str, query: str, max_results: int, fetch_content: bool) -> list[dict[str, Any]]:
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(html, "html.parser")
+    if soup.select_one("#seccodeInput") or "请输入验证码" in soup.get_text(" ", strip=True):
+        return [{
+            "title": "Sogou WeChat captcha required",
+            "url": "",
+            "snippet": "Sogou returned a captcha page; retry later or use Playwright/browser session fallback.",
+            "content": "",
+            "source": "sogou_wechat",
+            "platform": "wechat_official_account",
+            "media": {"query": query, "error": "captcha"},
+            "images": [],
+            "raw": {},
+        }]
+
+    records = []
+    for item in soup.select("ul.news-list li")[:max_results]:
+        title_link = item.select_one("h3 a") or item.select_one("a[data-z='art']")
+        if not title_link:
+            continue
+        title = _sogou_clean_text(title_link.get_text(" ", strip=True))
+        snippet_node = item.select_one("p.txt-info")
+        snippet = _sogou_clean_text(snippet_node.get_text(" ", strip=True) if snippet_node else "")
+        account_node = item.select_one("span.all-time-y2") or item.select_one("a.account")
+        account = _sogou_clean_text(account_node.get_text(" ", strip=True) if account_node else "")
+        script_text = " ".join(script.get_text(" ", strip=True) for script in item.select("script"))
+        published_at = ""
+        match = re.search(r"timeConvert\('?(\d+)'?\)", script_text)
+        if match:
+            published_at = _sogou_time_to_date(match.group(1))
+        image_node = item.select_one("img")
+        images = []
+        if image_node and image_node.get("src"):
+            images.append(urljoin("https:", image_node.get("src")))
+        sogou_url = urljoin(SOGOU_WECHAT_BASE_URL, title_link.get("href", ""))
+        url = _resolve_sogou_wechat_url(title_link.get("href", ""))
+        article = _fetch_wechat_article(url) if fetch_content else {}
+        content = article.get("content") or snippet
+        if article.get("images"):
+            images.extend([image for image in article["images"] if image not in images])
+        records.append({
+            "title": article.get("title") or title or "Untitled WeChat article",
+            "url": url,
+            "snippet": snippet,
+            "content": content,
+            "source": "sogou_wechat",
+            "platform": "wechat_official_account",
+            "media": {
+                "account": article.get("author") or account,
+                "published_at": published_at,
+                "query": query,
+                "sogou_url": sogou_url,
+                "content_fetched": bool(article.get("content")),
+                "fetch_error": article.get("error"),
+            },
+            "images": images,
+            "raw": {
+                "title": title,
+                "snippet": snippet,
+                "account": account,
+                "published_at": published_at,
+            },
+        })
+    return records
+
+
+def _sogou_wechat_search_sync(query: str, max_results: int, fetch_content: bool) -> list[dict[str, Any]]:
+    response = requests.get(
+        SOGOU_WECHAT_BASE_URL + "/weixin",
+        params={"type": "2", "query": query, "ie": "utf8", "s_from": "input", "_sug_": "n", "_sug_type_": ""},
+        headers=_sogou_wechat_headers(),
+        timeout=25,
+    )
+    response.raise_for_status()
+    return _parse_sogou_wechat_html(response.text, query, max_results, fetch_content)
+
+
+@tool(description=WECHAT_SOGOU_SEARCH_DESCRIPTION)
+async def wechat_sogou_search(
+    queries: List[str],
+    max_results: Annotated[int, InjectedToolArg] = 5,
+    config: RunnableConfig = None,
+) -> str:
+    """Fetch WeChat official account article search results from Sogou."""
+    fetch_content = bool((config or {}).get("configurable", {}).get("wechat_fetch_content", False))
+    all_records = []
+    for query in queries:
+        try:
+            records = await asyncio.to_thread(
+                _sogou_wechat_search_sync,
+                query,
+                max_results,
+                fetch_content,
+            )
+            all_records.extend(records)
+        except Exception as e:  # noqa: BLE001 - return provider failures as tool output
+            all_records.append({
+                "title": f"Sogou WeChat search failed for {query}",
+                "url": "",
+                "snippet": str(e),
+                "content": "",
+                "source": "sogou_wechat",
+                "platform": "wechat_official_account",
+                "media": {"query": query, "error": str(e)},
+                "images": [],
+                "raw": {},
+            })
+
+    if not all_records:
+        return "No valid Sogou WeChat results found. Try a different query."
+
+    formatted_output = "Sogou WeChat normalized search results:\n\n"
+    for i, record in enumerate(all_records[: max_results * max(1, len(queries))]):
+        formatted_output += f"--- SOURCE {i + 1}: {record['title']} ---\n"
+        formatted_output += f"URL: {record['url']}\n"
+        formatted_output += f"SOURCE: {record['source']}\n"
+        formatted_output += f"PLATFORM: {record['platform']}\n"
+        formatted_output += f"ACCOUNT: {record['media'].get('account', '')}\n"
+        formatted_output += f"PUBLISHED_AT: {record['media'].get('published_at', '')}\n"
+        formatted_output += f"SNIPPET: {record['snippet']}\n"
+        formatted_output += f"CONTENT:\n{record['content'][:4000]}\n"
+        formatted_output += f"IMAGES: {len(record['images'])}\n"
+        formatted_output += f"NORMALIZED_RECORD:\n{record}\n"
+        formatted_output += "-" * 80 + "\n\n"
+    return formatted_output
 
 ##########################
 # Tavily Search Tool Utils
@@ -136,41 +830,44 @@ async def tavily_search(
     return formatted_output
 
 async def tavily_search_async(
-    search_queries, 
-    max_results: int = 5, 
-    topic: Literal["general", "news", "finance"] = "general", 
-    include_raw_content: bool = True, 
+    search_queries,
+    max_results: int = 5,
+    topic: Literal["general", "news", "finance"] = "general",
+    include_raw_content: bool = True,
     config: RunnableConfig = None
 ):
-    """Execute multiple Tavily search queries asynchronously.
-    
-    Args:
-        search_queries: List of search query strings to execute
-        max_results: Maximum number of results per query
-        topic: Topic category for filtering results
-        include_raw_content: Whether to include full webpage content
-        config: Runtime configuration for API key access
-        
-    Returns:
-        List of search result dictionaries from Tavily API
-    """
-    # Initialize the Tavily client with API key from config
-    tavily_client = AsyncTavilyClient(api_key=get_tavily_api_key(config))
-    
-    # Create search tasks for parallel execution
-    search_tasks = [
-        tavily_client.search(
-            query,
-            max_results=max_results,
-            include_raw_content=include_raw_content,
-            topic=topic
+    """Execute multiple Tavily search queries asynchronously with retries."""
+    api_key = get_tavily_api_key(config)
+    if not api_key:
+        raise ValueError(
+            "TAVILY_API_KEY is not configured. Add it to ~/.hermes/.env or "
+            "run the CLI with --search-api seeded_web and --source-url for a "
+            "deterministic no-key smoke test."
         )
-        for query in search_queries
-    ]
-    
-    # Execute all search queries in parallel and return results
-    search_results = await asyncio.gather(*search_tasks)
-    return search_results
+
+    tavily_client = AsyncTavilyClient(api_key=api_key)
+
+    async def search_one(query: str):
+        last_error = None
+        for attempt in range(3):
+            try:
+                return await asyncio.wait_for(
+                    tavily_client.search(
+                        query,
+                        max_results=max_results,
+                        include_raw_content=include_raw_content,
+                        topic=topic,
+                    ),
+                    timeout=45.0,
+                )
+            except Exception as exc:  # noqa: BLE001 - surface provider/network failures to the tool output
+                last_error = exc
+                if attempt < 2:
+                    await asyncio.sleep(1.5 * (attempt + 1))
+        raise RuntimeError(f"Tavily search failed for query {query!r}: {last_error}")
+
+    search_tasks = [search_one(query) for query in search_queries]
+    return await asyncio.gather(*search_tasks)
 
 async def summarize_webpage(model: BaseChatModel, webpage_content: str) -> str:
     """Summarize webpage content using AI model with timeout protection.
@@ -532,7 +1229,7 @@ async def get_search_tool(search_api: SearchAPI):
     """Configure and return search tools based on the specified API provider.
     
     Args:
-        search_api: The search API provider to use (Anthropic, OpenAI, Tavily, or None)
+        search_api: The search API provider to use.
         
     Returns:
         List of configured search tool objects for the specified provider
@@ -556,6 +1253,56 @@ async def get_search_tool(search_api: SearchAPI):
             **(search_tool.metadata or {}), 
             "type": "search", 
             "name": "web_search"
+        }
+        return [search_tool]
+
+    elif search_api == SearchAPI.DUCKDUCKGO:
+        # Configure DuckDuckGo search for no-key public web search demos.
+        search_tool = duckduckgo_search
+        search_tool.metadata = {
+            **(search_tool.metadata or {}),
+            "type": "search",
+            "name": "web_search",
+        }
+        return [search_tool]
+
+    elif search_api == SearchAPI.BING_WEB:
+        # Configure Bing HTML search for no-key public web search demos.
+        search_tool = bing_web_search
+        search_tool.metadata = {
+            **(search_tool.metadata or {}),
+            "type": "search",
+            "name": "web_search",
+        }
+        return [search_tool]
+
+    elif search_api == SearchAPI.SEEDED_WEB:
+        # Configure seeded public URL reading for deterministic smoke demos.
+        search_tool = seeded_web_search
+        search_tool.metadata = {
+            **(search_tool.metadata or {}),
+            "type": "search",
+            "name": "web_search",
+        }
+        return [search_tool]
+
+    elif search_api == SearchAPI.MAXHUB:
+        # Configure MaxHub vertical search for Chinese social/content sources.
+        search_tool = maxhub_search
+        search_tool.metadata = {
+            **(search_tool.metadata or {}),
+            "type": "search",
+            "name": "web_search",
+        }
+        return [search_tool]
+
+    elif search_api == SearchAPI.WECHAT_SOGOU:
+        # Configure Sogou WeChat official account search.
+        search_tool = wechat_sogou_search
+        search_tool.metadata = {
+            **(search_tool.metadata or {}),
+            "type": "search",
+            "name": "web_search",
         }
         return [search_tool]
         
@@ -901,6 +1648,8 @@ def get_api_key_for_model(model_name: str, config: RunnableConfig):
             return api_keys.get("OPENAI_API_KEY")
         elif model_name.startswith("anthropic:"):
             return api_keys.get("ANTHROPIC_API_KEY")
+        elif model_name.startswith("deepseek:"):
+            return api_keys.get("DEEPSEEK_API_KEY")
         elif model_name.startswith("google"):
             return api_keys.get("GOOGLE_API_KEY")
         return None
@@ -909,9 +1658,24 @@ def get_api_key_for_model(model_name: str, config: RunnableConfig):
             return os.getenv("OPENAI_API_KEY")
         elif model_name.startswith("anthropic:"):
             return os.getenv("ANTHROPIC_API_KEY")
+        elif model_name.startswith("deepseek:"):
+            return os.getenv("DEEPSEEK_API_KEY")
         elif model_name.startswith("google"):
             return os.getenv("GOOGLE_API_KEY")
         return None
+
+def _get_tavily_api_key_from_cli_wrapper() -> str | None:
+    """Read the existing local Tavily CLI wrapper key without copying it into this repo."""
+    wrapper_path = "/usr/local/bin/tavily"
+    try:
+        with open(wrapper_path, encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                stripped = line.strip()
+                if stripped.startswith("API_KEY="):
+                    return stripped.split("=", 1)[1].strip().strip('"').strip("'") or None
+    except OSError:
+        return None
+    return None
 
 def get_tavily_api_key(config: RunnableConfig):
     """Get Tavily API key from environment or config."""
@@ -922,4 +1686,4 @@ def get_tavily_api_key(config: RunnableConfig):
             return None
         return api_keys.get("TAVILY_API_KEY")
     else:
-        return os.getenv("TAVILY_API_KEY")
+        return os.getenv("TAVILY_API_KEY") or _get_tavily_api_key_from_cli_wrapper()

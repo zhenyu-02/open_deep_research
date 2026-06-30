@@ -14,6 +14,11 @@ class SearchAPI(Enum):
     ANTHROPIC = "anthropic"
     OPENAI = "openai"
     TAVILY = "tavily"
+    DUCKDUCKGO = "duckduckgo"
+    BING_WEB = "bing_web"
+    SEEDED_WEB = "seeded_web"
+    MAXHUB = "maxhub"
+    WECHAT_SOGOU = "wechat_sogou"
     NONE = "none"
 
 class MCPConfig(BaseModel):
@@ -84,6 +89,11 @@ class Configuration(BaseModel):
                 "description": "Search API to use for research. NOTE: Make sure your Researcher Model supports the selected search API.",
                 "options": [
                     {"label": "Tavily", "value": SearchAPI.TAVILY.value},
+                    {"label": "DuckDuckGo", "value": SearchAPI.DUCKDUCKGO.value},
+                    {"label": "Bing Web", "value": SearchAPI.BING_WEB.value},
+                    {"label": "Seeded Web URLs", "value": SearchAPI.SEEDED_WEB.value},
+                    {"label": "MaxHub Vertical Sources", "value": SearchAPI.MAXHUB.value},
+                    {"label": "WeChat via Sogou", "value": SearchAPI.WECHAT_SOGOU.value},
                     {"label": "OpenAI Native Web Search", "value": SearchAPI.OPENAI.value},
                     {"label": "Anthropic Native Web Search", "value": SearchAPI.ANTHROPIC.value},
                     {"label": "None", "value": SearchAPI.NONE.value}
