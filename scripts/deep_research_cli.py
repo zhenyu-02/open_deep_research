@@ -70,8 +70,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--cnki-enabled",
         action="store_true",
-        default=False,
-        help="Enable CNKI (知网) academic paper search in multi_source mode. Requires Playwright. Slower due to browser automation.",
+        default=True,
+        help="Enable CNKI (知网) academic paper search in multi_source mode. Enabled by default. Requires Playwright. Slower due to browser automation.",
+    )
+    parser.add_argument(
+        "--no-cnki",
+        action="store_false",
+        dest="cnki_enabled",
+        help="Disable CNKI (知网) search in multi_source mode.",
     )
     parser.add_argument(
         "--xhs-deep-in-multi-source",
@@ -195,7 +201,7 @@ def build_config(args: argparse.Namespace, search_api: str) -> dict:
             "wechat_fetch_content": args.wechat_fetch_content,
             "xhs_ocr_max_images": args.xhs_ocr_max_images,
             "xhs_deep_in_multi_source": args.xhs_deep_in_multi_source,
-            "cnki_enabled": args.cnki_enabled,
+            "cnki_disabled": not args.cnki_enabled,
             "summarization_model": summarization_model,
             "research_model": args.model,
             "compression_model": args.model,

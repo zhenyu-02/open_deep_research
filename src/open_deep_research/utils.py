@@ -580,9 +580,53 @@ def _multi_source_default_providers(config: RunnableConfig = None) -> list[str]:
     providers.append("wechat_sogou")
     if not configurable.get("arxiv_disabled"):
         providers.append("arxiv")
-    if configurable.get("cnki_enabled"):
+    # CNKI is enabled by default; set cnki_disabled to opt out
+    if not configurable.get("cnki_disabled"):
         providers.append("cnki")
     return providers
+
+
+# Per-provider language routing: each provider only receives queries in languages it supports.
+#   Tavily: bilingual — all queries pass through
+#   MaxHub (XHS/Zhihu), WeChat, CNKI: Chinese-only — filter to queries containing CJK characters
+#   arXiv: English-only — filter to queries without CJK characters
+_CJK_RANGES = [
+    (0x4E00, 0x9FFF), (0x3400, 0x4DBF),  # CJK Unified Ideographs
+    (0xF900, 0xFAFF),  # CJK Compatibility Ideographs
+    (0x3000, 0x303F),  # CJK Symbols and Punctuation
+]
+
+
+def _query_has_cjk(text: str) -> bool:
+    """Return True if the text contains at least one CJK character."""
+    return any(
+        any(lo <= ord(ch) <= hi for lo, hi in _CJK_RANGES)
+        for ch in text
+    )
+
+
+def _filter_queries_for_provider(queries: list[str], provider: str) -> list[str]:
+    """Return the subset of queries appropriate for *provider*.
+
+    Chinese platforms (XHS, Zhihu, WeChat, CNKI) receive only CJK-containing queries.
+    English platforms (arXiv) receive only non-CJK queries.
+    Bilingual platforms (Tavily, seeded_web) receive all queries.
+
+    When a provider has NO matching queries:
+      - Chinese platforms fall back to ALL queries (search may still work)
+      - arXiv falls back to ALL queries (search may still find English metadata)
+    This ensures every provider always gets at least one query to run.
+    """
+    if not queries:
+        return queries
+    if provider in ("maxhub", "wechat_sogou", "cnki"):
+        cjk = [q for q in queries if _query_has_cjk(q)]
+        return cjk if cjk else queries  # fallback: try all
+    if provider == "arxiv":
+        en = [q for q in queries if not _query_has_cjk(q)]
+        return en if en else queries  # fallback: try all (may match English metadata)
+    # tavily, seeded_web — bilingual, pass all
+    return queries
 
 
 @tool(description=MULTI_SOURCE_SEARCH_DESCRIPTION)
@@ -599,18 +643,19 @@ async def multi_source_search(
     sections: list[str] = ["Multi-source search results", f"PROVIDERS: {providers}", ""]
     per_provider_results = max(1, min(max_results, 5))
     for provider in providers:
+        provider_queries = _filter_queries_for_provider(list(queries), provider)
         try:
             if provider == "seeded_web":
                 sections.append("## SEEDED_WEB")
-                sections.append(await seeded_web_search.ainvoke({"queries": queries, "max_results": per_provider_results, "config": config}))
+                sections.append(await seeded_web_search.ainvoke({"queries": provider_queries, "max_results": per_provider_results, "config": config}))
             elif provider == "tavily":
                 sections.append("## TAVILY")
-                sections.append(await tavily_search.ainvoke({"queries": queries, "max_results": per_provider_results, "config": config}))
+                sections.append(await tavily_search.ainvoke({"queries": provider_queries, "max_results": per_provider_results, "config": config}))
             elif provider == "maxhub":
                 sections.append("## MAXHUB")
                 records: list[dict[str, Any]] = []
                 platforms = (config or {}).get("configurable", {}).get("maxhub_platforms") or ["xiaohongshu", "zhihu"]
-                for query in queries:
+                for query in provider_queries:
                     records.extend(await asyncio.to_thread(_maxhub_search_sync, query, platforms, per_provider_results, config))
                 sections.append(_format_records_output("MaxHub normalized search results", records, per_provider_results * len(queries) * max(1, len(platforms))))
 
@@ -645,15 +690,15 @@ async def multi_source_search(
                 sections.append("## WECHAT_SOGOU")
                 fetch_content = bool((config or {}).get("configurable", {}).get("wechat_fetch_content", False))
                 records = []
-                for query in queries:
+                for query in provider_queries:
                     records.extend(await asyncio.to_thread(_sogou_wechat_search_sync, query, per_provider_results, fetch_content))
                 sections.append(_format_records_output("Sogou WeChat normalized search results", records, per_provider_results * len(queries)))
             elif provider == "arxiv":
                 sections.append("## ARXIV")
-                sections.append(await arxiv_search.ainvoke({"queries": queries, "max_results": per_provider_results, "config": config}))
+                sections.append(await arxiv_search.ainvoke({"queries": provider_queries, "max_results": per_provider_results, "config": config}))
             elif provider == "cnki":
                 sections.append("## CNKI")
-                sections.append(await cnki_search.ainvoke({"queries": queries, "max_results": per_provider_results, "config": config}))
+                sections.append(await cnki_search.ainvoke({"queries": provider_queries, "max_results": per_provider_results, "config": config}))
         except Exception as exc:  # noqa: BLE001 - provider failures should be visible evidence metadata
             sections.append(f"## {provider.upper()} ERROR\n{exc}\n")
     return "\n\n".join(sections)
