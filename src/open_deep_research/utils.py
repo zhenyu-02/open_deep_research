@@ -568,7 +568,7 @@ def _multi_source_default_providers(config: RunnableConfig = None) -> list[str]:
     configurable = (config or {}).get("configurable", {})
     requested = configurable.get("multi_source_providers") or []
     if requested:
-        return [provider for provider in requested if provider in {"seeded_web", "tavily", "maxhub", "wechat_sogou"}]
+        return [provider for provider in requested if provider in {"seeded_web", "tavily", "maxhub", "wechat_sogou", "arxiv"}]
 
     providers: list[str] = []
     if configurable.get("source_urls"):
@@ -578,6 +578,8 @@ def _multi_source_default_providers(config: RunnableConfig = None) -> list[str]:
     if _maxhub_api_key(config):
         providers.append("maxhub")
     providers.append("wechat_sogou")
+    if not configurable.get("arxiv_disabled"):
+        providers.append("arxiv")
     return providers
 
 
@@ -609,6 +611,34 @@ async def multi_source_search(
                 for query in queries:
                     records.extend(await asyncio.to_thread(_maxhub_search_sync, query, platforms, per_provider_results, config))
                 sections.append(_format_records_output("MaxHub normalized search results", records, per_provider_results * len(queries) * max(1, len(platforms))))
+
+                # Optionally run deep Xiaohongshu evidence (detail fetch + OCR) inline
+                xhs_deep_enabled = bool((config or {}).get("configurable", {}).get("xhs_deep_in_multi_source", True))
+                if xhs_deep_enabled and "xiaohongshu" in platforms:
+                    xhs_records = [r for r in records if r.get("platform") == "xiaohongshu" and not r.get("media", {}).get("error")]
+                    if xhs_records:
+                        sections.append("### XHS Deep Evidence (detail + OCR)")
+                        deep_evidence: list[dict[str, Any]] = []
+                        for record in xhs_records[:per_provider_results]:
+                            try:
+                                deep_evidence.append(await asyncio.to_thread(_xhs_build_evidence_record, record, config))
+                            except Exception as exc:  # noqa: BLE001 — surface one note's failure
+                                deep_evidence.append({
+                                    "title": record.get("title", "Unknown"),
+                                    "url": record.get("url", ""),
+                                    "note_id": "",
+                                    "xsec_token": "",
+                                    "note_type": "",
+                                    "author": "",
+                                    "engagement": {},
+                                    "content": str(exc),
+                                    "images": [],
+                                    "ocr": _local_ocr_engine_status(),
+                                    "detail_endpoint": "",
+                                    "detail_error": str(exc),
+                                    "raw_detail": {},
+                                })
+                        sections.append(_format_xhs_evidence(deep_evidence))
             elif provider == "wechat_sogou":
                 sections.append("## WECHAT_SOGOU")
                 fetch_content = bool((config or {}).get("configurable", {}).get("wechat_fetch_content", False))
@@ -616,6 +646,9 @@ async def multi_source_search(
                 for query in queries:
                     records.extend(await asyncio.to_thread(_sogou_wechat_search_sync, query, per_provider_results, fetch_content))
                 sections.append(_format_records_output("Sogou WeChat normalized search results", records, per_provider_results * len(queries)))
+            elif provider == "arxiv":
+                sections.append("## ARXIV")
+                sections.append(await arxiv_search.ainvoke({"queries": queries, "max_results": per_provider_results, "config": config}))
         except Exception as exc:  # noqa: BLE001 - provider failures should be visible evidence metadata
             sections.append(f"## {provider.upper()} ERROR\n{exc}\n")
     return "\n\n".join(sections)
@@ -1562,6 +1595,95 @@ async def load_mcp_tools(
         configured_tools.append(enhanced_tool)
     
     return configured_tools
+
+
+##########################
+# arXiv Academic Paper Search
+##########################
+ARXIV_SEARCH_DESCRIPTION = (
+    "Search academic papers on arXiv.org. Returns title, authors, abstract, "
+    "publication date, PDF link, and categories. Free, no API key required."
+)
+ARXIV_API_BASE = "http://export.arxiv.org/api/query"
+
+
+def _arxiv_search_sync(query: str, max_results: int) -> list[dict[str, Any]]:
+    """Search arXiv API synchronously, returning normalized records."""
+    import urllib.request
+    import urllib.parse
+    import xml.etree.ElementTree as ET
+
+    params = urllib.parse.urlencode({
+        "search_query": f"all:{query}",
+        "start": 0,
+        "max_results": max_results,
+    })
+    url = f"{ARXIV_API_BASE}?{params}"
+    req = urllib.request.Request(url, headers={"User-Agent": "open-deep-research-cli/0.1"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as response:
+            raw = response.read().decode("utf-8")
+    except Exception as exc:
+        return [{"title": f"arXiv search failed for {query}", "url": "", "snippet": str(exc),
+                 "content": "", "source": "arxiv", "platform": "arxiv", "media": {"query": query, "error": str(exc)},
+                 "images": [], "raw": {}}]
+
+    ns = {"atom": "http://www.w3.org/2005/Atom", "arxiv": "http://arxiv.org/schemas/atom"}
+    root = ET.fromstring(raw)
+    records: list[dict[str, Any]] = []
+    for entry in root.findall("atom:entry", ns):
+        title_el = entry.find("atom:title", ns)
+        summary_el = entry.find("atom:summary", ns)
+        pdf_url = ""
+        for link in entry.findall("atom:link", ns):
+            if link.attrib.get("title") == "pdf":
+                pdf_url = link.attrib.get("href", "")
+                break
+        authors = [author.find("atom:name", ns).text or "" for author in entry.findall("atom:author", ns) if author.find("atom:name", ns) is not None]
+        published_el = entry.find("atom:published", ns)
+        categories = [cat.attrib.get("term", "") for cat in entry.findall("atom:category", ns)]
+        title = (title_el.text or "").strip().replace("\n", " ") if title_el is not None else "Untitled"
+        summary = (summary_el.text or "").strip()[:2000] if summary_el is not None else ""
+        records.append({
+            "title": title,
+            "url": pdf_url or entry.find("atom:id", ns).text if entry.find("atom:id", ns) is not None else "",
+            "snippet": summary,
+            "content": summary,
+            "source": "arxiv",
+            "platform": "arxiv",
+            "media": {
+                "authors": authors,
+                "published": published_el.text if published_el is not None else "",
+                "categories": categories,
+                "query": query,
+            },
+            "images": [],
+            "raw": {"title": title, "summary": summary, "authors": authors, "pdf_url": pdf_url},
+        })
+    return records
+
+
+@tool(description=ARXIV_SEARCH_DESCRIPTION)
+async def arxiv_search(
+    queries: List[str],
+    max_results: Annotated[int, InjectedToolArg] = 5,
+    config: RunnableConfig = None,
+) -> str:
+    """Search arXiv for academic papers matching the given queries."""
+    all_records: list[dict[str, Any]] = []
+    for query in queries:
+        try:
+            all_records.extend(await asyncio.to_thread(_arxiv_search_sync, query, max_results))
+        except Exception as exc:  # noqa: BLE001
+            all_records.append({
+                "title": f"arXiv search failed for {query}",
+                "url": "", "snippet": str(exc), "content": "",
+                "source": "arxiv", "platform": "arxiv",
+                "media": {"query": query, "error": str(exc)}, "images": [], "raw": {},
+            })
+    if not all_records:
+        return "No arXiv results found."
+    return _format_records_output("arXiv search results", all_records, max_results * len(queries))
 
 
 ##########################

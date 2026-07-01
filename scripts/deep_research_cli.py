@@ -63,9 +63,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--multi-source-provider",
         action="append",
-        choices=["seeded_web", "tavily", "maxhub", "wechat_sogou"],
+        choices=["seeded_web", "tavily", "maxhub", "wechat_sogou", "arxiv"],
         default=[],
-        help="Provider to include when --search-api multi_source/auto is used. Can be repeated. Default: seeded_web when URLs exist plus tavily, maxhub, wechat_sogou when usable.",
+        help="Provider to include when --search-api multi_source/auto is used. Can be repeated. Default: seeded_web when URLs exist plus tavily, maxhub, wechat_sogou, arxiv when usable.",
     )
     parser.add_argument(
         "--maxhub-platform",
