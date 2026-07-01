@@ -19,6 +19,8 @@ class SearchAPI(Enum):
     SEEDED_WEB = "seeded_web"
     MAXHUB = "maxhub"
     WECHAT_SOGOU = "wechat_sogou"
+    MULTI_SOURCE = "multi_source"
+    XIAOHONGSHU_DEEP = "xiaohongshu_deep"
     NONE = "none"
 
 class MCPConfig(BaseModel):
@@ -94,6 +96,8 @@ class Configuration(BaseModel):
                     {"label": "Seeded Web URLs", "value": SearchAPI.SEEDED_WEB.value},
                     {"label": "MaxHub Vertical Sources", "value": SearchAPI.MAXHUB.value},
                     {"label": "WeChat via Sogou", "value": SearchAPI.WECHAT_SOGOU.value},
+                    {"label": "Multi-source Orchestrator", "value": SearchAPI.MULTI_SOURCE.value},
+                    {"label": "Xiaohongshu Deep Evidence", "value": SearchAPI.XIAOHONGSHU_DEEP.value},
                     {"label": "OpenAI Native Web Search", "value": SearchAPI.OPENAI.value},
                     {"label": "Anthropic Native Web Search", "value": SearchAPI.ANTHROPIC.value},
                     {"label": "None", "value": SearchAPI.NONE.value}

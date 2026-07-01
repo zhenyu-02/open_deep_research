@@ -503,6 +503,228 @@ async def maxhub_search(
     return formatted_output
 
 
+
+##########################
+# Multi-source Search Orchestrator
+##########################
+MULTI_SOURCE_SEARCH_DESCRIPTION = (
+    "Aggregate evidence across configured providers instead of selecting a single search API. "
+    "It can combine seeded URLs, Tavily public web, MaxHub vertical sources, and Sogou WeChat results; "
+    "provider failures are reported inline without failing the whole search."
+)
+XIAOHONGSHU_DEEP_SEARCH_DESCRIPTION = (
+    "Run a Xiaohongshu-specific evidence flow: search notes, fetch note detail, collect images, "
+    "attempt local OCR when an OCR engine is available, and return Markdown evidence notes."
+)
+
+
+def _format_records_output(title: str, records: list[dict[str, Any]], max_records: int) -> str:
+    if not records:
+        return f"{title}: no records.\n"
+    output = f"{title}:\n\n"
+    for i, record in enumerate(records[:max_records]):
+        output += f"--- SOURCE {i + 1}: {record.get('title', 'Untitled')} ---\n"
+        output += f"URL: {record.get('url', '')}\n"
+        output += f"SOURCE: {record.get('source', '')}\n"
+        output += f"PLATFORM: {record.get('platform', '')}\n"
+        output += f"SNIPPET: {record.get('snippet', '')}\n"
+        output += f"CONTENT:\n{str(record.get('content', ''))[:4000]}\n"
+        output += f"IMAGES: {len(record.get('images') or [])}\n"
+        output += f"MEDIA: {record.get('media', {})}\n"
+        output += f"NORMALIZED_RECORD:\n{record}\n"
+        output += "-" * 80 + "\n\n"
+    return output
+
+
+def _multi_source_default_providers(config: RunnableConfig = None) -> list[str]:
+    configurable = (config or {}).get("configurable", {})
+    requested = configurable.get("multi_source_providers") or []
+    if requested:
+        return [provider for provider in requested if provider in {"seeded_web", "tavily", "maxhub", "wechat_sogou"}]
+
+    providers: list[str] = []
+    if configurable.get("source_urls"):
+        providers.append("seeded_web")
+    if get_tavily_api_key(config):
+        providers.append("tavily")
+    if _maxhub_api_key(config):
+        providers.append("maxhub")
+    providers.append("wechat_sogou")
+    return providers
+
+
+@tool(description=MULTI_SOURCE_SEARCH_DESCRIPTION)
+async def multi_source_search(
+    queries: List[str],
+    max_results: Annotated[int, InjectedToolArg] = 5,
+    config: RunnableConfig = None,
+) -> str:
+    """Aggregate search/evidence results across configured providers."""
+    providers = _multi_source_default_providers(config)
+    if not providers:
+        return "No multi-source providers are available. Configure source URLs, TAVILY_API_KEY, MAXHUB_API_KEY, or explicit --multi-source-provider values."
+
+    sections: list[str] = ["Multi-source search results", f"PROVIDERS: {providers}", ""]
+    per_provider_results = max(1, min(max_results, 5))
+    for provider in providers:
+        try:
+            if provider == "seeded_web":
+                sections.append("## SEEDED_WEB")
+                sections.append(await seeded_web_search.ainvoke({"queries": queries, "max_results": per_provider_results, "config": config}))
+            elif provider == "tavily":
+                sections.append("## TAVILY")
+                sections.append(await tavily_search.ainvoke({"queries": queries, "max_results": per_provider_results, "config": config}))
+            elif provider == "maxhub":
+                sections.append("## MAXHUB")
+                records: list[dict[str, Any]] = []
+                platforms = (config or {}).get("configurable", {}).get("maxhub_platforms") or ["xiaohongshu", "zhihu"]
+                for query in queries:
+                    records.extend(await asyncio.to_thread(_maxhub_search_sync, query, platforms, per_provider_results, config))
+                sections.append(_format_records_output("MaxHub normalized search results", records, per_provider_results * len(queries) * max(1, len(platforms))))
+            elif provider == "wechat_sogou":
+                sections.append("## WECHAT_SOGOU")
+                fetch_content = bool((config or {}).get("configurable", {}).get("wechat_fetch_content", False))
+                records = []
+                for query in queries:
+                    records.extend(await asyncio.to_thread(_sogou_wechat_search_sync, query, per_provider_results, fetch_content))
+                sections.append(_format_records_output("Sogou WeChat normalized search results", records, per_provider_results * len(queries)))
+        except Exception as exc:  # noqa: BLE001 - provider failures should be visible evidence metadata
+            sections.append(f"## {provider.upper()} ERROR\n{exc}\n")
+    return "\n\n".join(sections)
+
+
+def _xhs_note_identity(record: dict[str, Any]) -> tuple[str, str, str]:
+    raw = record.get("raw") or {}
+    note = raw.get("note", raw) if isinstance(raw, dict) else {}
+    media = record.get("media") or {}
+    note_id = str(note.get("id") or note.get("note_id") or note.get("noteId") or "")
+    xsec_token = str(note.get("xsec_token") or note.get("xsecToken") or "")
+    note_type = str(media.get("type") or note.get("type") or note.get("model_type") or "normal")
+    if not note_id:
+        parsed = urlparse(record.get("url", ""))
+        note_id = parsed.path.rstrip("/").split("/")[-1] if parsed.path else ""
+    return note_id, xsec_token, note_type
+
+
+def _xhs_collect_images(value: Any) -> list[str]:
+    images: list[str] = []
+    if isinstance(value, dict):
+        for key in ("url", "url_size_large", "original", "src", "data-src", "image_url"):
+            if value.get(key):
+                images.append(str(value[key]))
+        for nested_key in ("images", "image_list", "images_list", "imageList"):
+            images.extend(_xhs_collect_images(value.get(nested_key)))
+    elif isinstance(value, list):
+        for item in value:
+            images.extend(_xhs_collect_images(item))
+    elif isinstance(value, str) and value.startswith("http"):
+        images.append(value)
+    return list(dict.fromkeys(images))
+
+
+def _xhs_detail_payload(note_id: str, note_type: str, record: dict[str, Any], config: RunnableConfig = None) -> dict[str, Any]:
+    if not note_id:
+        return {"error": "missing_note_id"}
+    share_text = record.get("url") or f"https://www.xiaohongshu.com/explore/{note_id}"
+    endpoints = ["/api/v1/xiaohongshu/app_v2/get_image_note_detail"]
+    if "video" in note_type.lower():
+        endpoints.insert(0, "/api/v1/xiaohongshu/app_v2/get_video_note_detail")
+    last_error = None
+    for endpoint in endpoints:
+        try:
+            payload = _maxhub_get(endpoint, {"note_id": note_id, "share_text": share_text}, config)
+            payload["_detail_endpoint"] = endpoint
+            return payload
+        except Exception as exc:  # noqa: BLE001 - try fallback endpoint
+            last_error = str(exc)
+    return {"error": last_error or "detail_fetch_failed"}
+
+
+def _local_ocr_status() -> dict[str, Any]:
+    return {
+        "available": False,
+        "engine": None,
+        "reason": "No local OCR engine detected. Install tesseract plus Pillow/pytesseract or EasyOCR to enable image OCR.",
+    }
+
+
+def _xhs_build_evidence_record(record: dict[str, Any], config: RunnableConfig = None) -> dict[str, Any]:
+    note_id, xsec_token, note_type = _xhs_note_identity(record)
+    detail = _xhs_detail_payload(note_id, note_type, record, config)
+    images = list(dict.fromkeys((record.get("images") or []) + _xhs_collect_images(detail)))
+    content = _compact_text(record.get("content"), record.get("snippet"), detail, limit=5000)
+    return {
+        "title": record.get("title") or "Untitled Xiaohongshu note",
+        "url": record.get("url"),
+        "note_id": note_id,
+        "xsec_token": xsec_token,
+        "note_type": note_type,
+        "author": (record.get("media") or {}).get("author"),
+        "engagement": {key: (record.get("media") or {}).get(key) for key in ["liked_count", "collected_count", "comments_count", "shared_count"]},
+        "content": content,
+        "images": images,
+        "ocr": _local_ocr_status(),
+        "detail_endpoint": detail.get("_detail_endpoint"),
+        "detail_error": detail.get("error"),
+        "raw_detail": detail,
+    }
+
+
+def _format_xhs_evidence(records: list[dict[str, Any]]) -> str:
+    output = "Xiaohongshu deep evidence notes\n\n"
+    for i, record in enumerate(records, 1):
+        output += f"## Evidence {i}: {record['title']}\n"
+        output += f"URL: {record.get('url') or ''}\n"
+        output += f"NOTE_ID: {record.get('note_id') or ''}\n"
+        output += f"AUTHOR: {record.get('author') or ''}\n"
+        output += f"TYPE: {record.get('note_type') or ''}\n"
+        output += f"DETAIL_ENDPOINT: {record.get('detail_endpoint') or ''}\n"
+        if record.get("detail_error"):
+            output += f"DETAIL_ERROR: {record['detail_error']}\n"
+        output += f"ENGAGEMENT: {record.get('engagement', {})}\n"
+        output += f"IMAGES: {len(record.get('images') or [])}\n"
+        for image in (record.get("images") or [])[:12]:
+            output += f"- IMAGE: {image}\n"
+        output += f"OCR_STATUS: {record.get('ocr', {})}\n"
+        output += f"CONTENT:\n{record.get('content', '')[:5000]}\n"
+        output += f"NORMALIZED_EVIDENCE_RECORD:\n{record}\n"
+        output += "-" * 80 + "\n\n"
+    return output
+
+
+@tool(description=XIAOHONGSHU_DEEP_SEARCH_DESCRIPTION)
+async def xiaohongshu_deep_search(
+    queries: List[str],
+    max_results: Annotated[int, InjectedToolArg] = 3,
+    config: RunnableConfig = None,
+) -> str:
+    """Search Xiaohongshu notes, fetch detail records, collect images, and expose OCR status."""
+    all_evidence: list[dict[str, Any]] = []
+    for query in queries:
+        try:
+            search_records = await asyncio.to_thread(_maxhub_search_sync, query, ["xiaohongshu"], max_results, config)
+            for record in search_records[:max_results]:
+                all_evidence.append(await asyncio.to_thread(_xhs_build_evidence_record, record, config))
+        except Exception as exc:  # noqa: BLE001 - return provider failures as evidence
+            all_evidence.append({
+                "title": f"Xiaohongshu deep flow failed for {query}",
+                "url": "",
+                "note_id": "",
+                "xsec_token": "",
+                "note_type": "",
+                "author": "",
+                "engagement": {},
+                "content": str(exc),
+                "images": [],
+                "ocr": _local_ocr_status(),
+                "detail_endpoint": "",
+                "detail_error": str(exc),
+                "raw_detail": {},
+            })
+    if not all_evidence:
+        return "No Xiaohongshu evidence records found. Try another query."
+    return _format_xhs_evidence(all_evidence)
+
 ##########################
 # WeChat Official Account Search via Sogou
 ##########################
@@ -1299,6 +1521,24 @@ async def get_search_tool(search_api: SearchAPI):
     elif search_api == SearchAPI.WECHAT_SOGOU:
         # Configure Sogou WeChat official account search.
         search_tool = wechat_sogou_search
+        search_tool.metadata = {
+            **(search_tool.metadata or {}),
+            "type": "search",
+            "name": "web_search",
+        }
+        return [search_tool]
+
+    elif search_api == SearchAPI.MULTI_SOURCE:
+        search_tool = multi_source_search
+        search_tool.metadata = {
+            **(search_tool.metadata or {}),
+            "type": "search",
+            "name": "web_search",
+        }
+        return [search_tool]
+
+    elif search_api == SearchAPI.XIAOHONGSHU_DEEP:
+        search_tool = xiaohongshu_deep_search
         search_tool.metadata = {
             **(search_tool.metadata or {}),
             "type": "search",

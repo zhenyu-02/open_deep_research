@@ -30,7 +30,7 @@ cd /home/ubuntu/open_deep_research
 ## Current Defaults
 
 - Model: `deepseek:deepseek-chat`
-- Search: `auto` by default: `seeded_web` when `--source-url` is provided, `tavily` when `TAVILY_API_KEY` exists or the local `/usr/local/bin/tavily` wrapper provides a key, otherwise `bing_web`
+- Search: `auto` resolves to `multi_source`, which aggregates configured providers instead of choosing only one. Use explicit `--search-api seeded_web|tavily|maxhub|wechat_sogou|xiaohongshu_deep` for focused runs.
 - Env file: `/home/ubuntu/.hermes/.env`
 - Mode: `direct` researcher subgraph smoke test
 - Clarification: disabled unless `--allow-clarification` is passed in `full` mode
@@ -62,6 +62,10 @@ Generated files: `demo-tavily-report.md` and `demo-tavily-raw-notes.md`.
 
 MaxHub vertical search is available with `--search-api maxhub`. The first MVP adapter queries Xiaohongshu App V2 note search and Zhihu article/question search, then normalizes results to `title/url/snippet/content/source/platform/media/images/raw`. Use `--maxhub-platform xiaohongshu` or `--maxhub-platform zhihu` to limit platforms. Xiaohongshu Web V3 note search was tested and returned 410, so the adapter uses `/api/v1/xiaohongshu/app_v2/search_notes`.
 
+Multi-source orchestration is available with `--search-api multi_source` or default `auto`. It aggregates `seeded_web`, `tavily`, `maxhub`, and `wechat_sogou` when configured. Restrict providers with repeated `--multi-source-provider`, for example `--multi-source-provider tavily --multi-source-provider maxhub`. Provider errors are included in raw notes instead of failing the whole run.
+
+Xiaohongshu deep evidence mode is available with `--search-api xiaohongshu_deep`. It searches Xiaohongshu notes through MaxHub App V2, attempts App V2 detail endpoints (`get_image_note_detail` / `get_video_note_detail`), collects image URLs, and emits an OCR status per evidence node. This host currently has no local OCR engine installed, so OCR reports `available=false` until tesseract+pytesseract/Pillow or EasyOCR is installed.
+
 WeChat official-account article search is available with `--search-api wechat_sogou`. It uses Sogou Weixin article search (`type=2`) rather than MaxHub, parses `ul.news-list li`, resolves Sogou `/link?...` JavaScript redirect pages into real `mp.weixin.qq.com/s?...` URLs, and normalizes results to the same `title/url/snippet/content/source/platform/media/images/raw` shape. By default `content` is the Sogou snippet; `--wechat-fetch-content` attempts to fetch article bodies, but current requests-only extraction often cannot access `#js_content`, so Playwright click/session extraction remains a follow-up.
 
 Live WeChat/Sogou demo output:
@@ -81,6 +85,14 @@ cd /home/ubuntu/open_deep_research
 ```
 
 Generated files: `demo-wechat-sogou-report.md` and `demo-wechat-sogou-raw-notes.md`.
+
+## Skill Entrypoints
+
+Hermes local skill installed at `/home/ubuntu/.hermes/skills/research/open-deep-research/SKILL.md`; repo copy lives at `skills/hermes/open-deep-research/SKILL.md`.
+
+Claude Code project command lives at `.claude/commands/open-deep-research.md`; a user-level copy was also written to `/home/ubuntu/.claude/commands/open-deep-research.md`.
+
+Codex skill wrapper lives at `skills/codex/open-deep-research-cli/SKILL.md`.
 
 ## Run History
 

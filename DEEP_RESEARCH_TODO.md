@@ -21,7 +21,7 @@
 - [x] Harden Tavily provider path in the CLI branch: auto-select when `TAVILY_API_KEY` exists, add clear missing-key diagnostics, retry, and timeout handling.
 - [x] Reuse the local `/usr/local/bin/tavily` wrapper credentials at runtime without copying secrets into the repo; run a live Tavily query-search demo through Clash proxy. Output: `demo-tavily-report.md`, `demo-tavily-raw-notes.md`.
 - [ ] Optional: move Tavily credentials into `/home/ubuntu/.hermes/.env` as `TAVILY_API_KEY` or document the wrapper fallback as the canonical server path.
-- [ ] Add a multi-source search orchestrator. Current `search_api` is single-provider selection; default `auto` chooses one provider rather than aggregating Tavily + MaxHub + WeChat + seeded sources.
+- [x] Add a multi-source search orchestrator. `auto` now resolves to `multi_source`, aggregating configured seeded_web, Tavily, MaxHub, and Sogou WeChat providers; repeated `--multi-source-provider` restricts providers.
 - [ ] Add source scoring and de-duplication across providers. Tavily demo showed useful breadth but mixed first-party sources with third-party blogs/videos; reports need explicit source credibility labels.
 - [ ] Add a compact report format: one-line answer, three key findings, evidence nodes, and full report.
 - [ ] Add negative findings: hypotheses considered but rejected.
@@ -30,7 +30,7 @@
 
 - [x] Add a MaxHub provider adapter with a normalized schema: `title`, `url`, `snippet`, `content`, `source`, `platform`, `media`, `images`, `raw`. Existing MaxHub skill docs are in `/home/ubuntu/.hermes/skills/openclaw-imports/maxhub`; `/home/ubuntu/.hermes/.env` has `MAXHUB_API_KEY`.
 - [x] Test Xiaohongshu search result shape. Web V3 search returns 410; App V2 `/api/v1/xiaohongshu/app_v2/search_notes` works and returns `data.data.items[].note`, including `images_list`.
-- [ ] Build a separate Xiaohongshu note-detail/OCR flow: search notes -> fetch note detail -> collect images -> local OCR -> DeepSeek Flash quality/check pass -> Markdown evidence note. Search result images are already available as CDN URLs in `images_list`; detail/OCR still needs implementation.
+- [x] Build a separate Xiaohongshu note-detail/OCR flow: search notes -> fetch note detail -> collect images -> local OCR -> DeepSeek Flash quality/check pass -> Markdown evidence note. Current `xiaohongshu_deep` mode searches notes, tries App V2 detail endpoints, collects image URLs, and emits OCR availability/status; this host still needs a local OCR engine and DeepSeek Flash quality pass wiring.
 - [x] Test Zhihu search shape. `/api/v1/zhihu/web/fetch_article_search_v3` works; results are nested under `data.data[].object` and sometimes `content_items[].object`.
 - [ ] Test Zhihu detail endpoints and add detail fetch for selected search hits.
 - [ ] Add Zhihu point/evidence extraction from detail pages.
@@ -48,8 +48,8 @@
 
 ## Phase 5: Hermes / Claude Code Integration
 
-- [ ] Wrap the CLI as a Hermes skill. This is the preferred next entrypoint; do not build HTTP first.
-- [ ] Wrap the CLI as a Claude Code skill or command so it can be called directly from Claude Code.
+- [x] Wrap the CLI as a Hermes skill. Installed at `/home/ubuntu/.hermes/skills/research/open-deep-research/SKILL.md`; repo copy is `skills/hermes/open-deep-research/SKILL.md`.
+- [x] Wrap the CLI as a Claude Code skill or command so it can be called directly from Claude Code. Project command is `.claude/commands/open-deep-research.md`; user copy is `/home/ubuntu/.claude/commands/open-deep-research.md`; Codex skill wrapper is `skills/codex/open-deep-research-cli/SKILL.md`.
 - [ ] Optionally expose it as an MCP server after the skill path is stable.
 - [ ] Add Hermes cron templates for scheduled research.
 - [ ] Add Telegram/WeChat push formatting for the compact report.

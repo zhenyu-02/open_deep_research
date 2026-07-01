@@ -47,11 +47,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--search-api",
         default="auto",
-        choices=["auto", "seeded_web", "bing_web", "duckduckgo", "tavily", "maxhub", "wechat_sogou", "openai", "anthropic", "none"],
+        choices=["auto", "multi_source", "xiaohongshu_deep", "seeded_web", "bing_web", "duckduckgo", "tavily", "maxhub", "wechat_sogou", "openai", "anthropic", "none"],
         help=(
             "Search provider. Default: auto "
-            "(Tavily when TAVILY_API_KEY is set, seeded_web when --source-url is "
-            "provided, otherwise bing_web)."
+            "(multi_source orchestration across configured sources; use explicit "
+            "providers for single-source runs)."
         ),
     )
     parser.add_argument(
@@ -59,6 +59,13 @@ def parse_args() -> argparse.Namespace:
         action="append",
         default=[],
         help="Public URL to read as a seeded web source. Can be repeated.",
+    )
+    parser.add_argument(
+        "--multi-source-provider",
+        action="append",
+        choices=["seeded_web", "tavily", "maxhub", "wechat_sogou"],
+        default=[],
+        help="Provider to include when --search-api multi_source/auto is used. Can be repeated. Default: seeded_web when URLs exist plus tavily, maxhub, wechat_sogou when usable.",
     )
     parser.add_argument(
         "--maxhub-platform",
@@ -146,11 +153,7 @@ def utc_now_iso() -> str:
 def resolve_search_api(args: argparse.Namespace) -> str:
     search_api = args.search_api
     if search_api == "auto":
-        if args.source_url:
-            return "seeded_web"
-        if get_tavily_api_key({"configurable": {}}):
-            return "tavily"
-        return "bing_web"
+        return "multi_source"
     if args.source_url and search_api == "bing_web":
         return "seeded_web"
     return search_api
@@ -163,6 +166,7 @@ def build_config(args: argparse.Namespace, search_api: str) -> dict:
             "allow_clarification": args.allow_clarification,
             "search_api": search_api,
             "source_urls": args.source_url,
+            "multi_source_providers": args.multi_source_provider,
             "maxhub_platforms": args.maxhub_platform or ["xiaohongshu", "zhihu"],
             "wechat_fetch_content": args.wechat_fetch_content,
             "summarization_model": summarization_model,
@@ -242,8 +246,8 @@ async def run(args: argparse.Namespace) -> dict:
     if args.mode == "direct":
         research_topic = (
             f"{args.question}\n\n"
-            "Use the configured public web search tool at least once before "
-            "summarizing. Include source URLs in the synthesis."
+            "Use the configured search/evidence tool at least once before "
+            "summarizing. Include source URLs, platform labels, and evidence limitations in the synthesis."
         )
         return await researcher_subgraph.ainvoke(
             {
