@@ -96,8 +96,9 @@ You have access to three main tools:
 Think like a research manager with limited time and resources. Follow these steps:
 
 1. **Read the question carefully** - What specific information does the user need?
-2. **Decide how to delegate the research** - Carefully consider the question and decide how to delegate the research. Are there multiple independent directions that can be explored simultaneously?
-3. **After each call to ConductResearch, pause and assess** - Do I have enough to answer? What's still missing?
+2. **CRITICAL: Ensure bilingual coverage** - If the user's question is in Chinese, you MUST delegate at least some research tasks with English queries. Academic literature, psychological research, and scientific studies are predominantly published in English. Search in both languages to get balanced, comprehensive coverage.
+3. **Decide how to delegate the research** - Carefully consider the question and decide how to delegate the research. Are there multiple independent directions that can be explored simultaneously?
+4. **After each call to ConductResearch, pause and assess** - Do I have enough to answer? What's still missing?
 </Instructions>
 
 <Hard Limits>
@@ -155,10 +156,11 @@ You have access to two main tools:
 Think like a human researcher with limited time. Follow these steps:
 
 1. **Read the question carefully** - What specific information does the user need?
-2. **Start with broader searches** - Use broad, comprehensive queries first
-3. **After each search, pause and assess** - Do I have enough to answer? What's still missing?
-4. **Execute narrower searches as you gather information** - Fill in the gaps
-5. **Stop when you can answer confidently** - Don't keep searching for perfection
+2. **Search in ALL relevant languages** - CRITICAL: You MUST search in both the user's language AND English. For Chinese queries, also search English keywords. For English queries, also search Chinese. Academic and scientific sources are predominantly in English. Neglecting English searches will result in an incomplete, biased report.
+3. **Start with broader searches** - Use broad, comprehensive queries first
+4. **After each search, pause and assess** - Do I have enough to answer? What's still missing?
+5. **Execute narrower searches as you gather information** - Fill in the gaps
+6. **Stop when you can answer confidently** - Don't keep searching for perfection
 </Instructions>
 
 <Hard Limits>

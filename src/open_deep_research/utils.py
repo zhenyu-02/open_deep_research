@@ -430,21 +430,48 @@ def _normalize_zhihu(payload: dict[str, Any], query: str, limit: int) -> list[di
 
 
 def _maxhub_search_sync(query: str, platforms: list[str], max_results: int, config: RunnableConfig = None) -> list[dict[str, Any]]:
+    """Search MaxHub platforms independently — one platform failure does not discard results from others."""
     records: list[dict[str, Any]] = []
     if "xiaohongshu" in platforms:
-        payload = _maxhub_get(
-            "/api/v1/xiaohongshu/app_v2/search_notes",
-            {"keyword": query, "page": 1, "sort_type": "general"},
-            config,
-        )
-        records.extend(_normalize_xhs(payload, query, max_results))
+        try:
+            payload = _maxhub_get(
+                "/api/v1/xiaohongshu/app_v2/search_notes",
+                {"keyword": query, "page": 1, "sort_type": "general"},
+                config,
+            )
+            records.extend(_normalize_xhs(payload, query, max_results))
+        except Exception as exc:  # noqa: BLE001 — surface one platform's failure, keep others
+            records.append({
+                "title": f"Xiaohongshu search failed for {query}",
+                "url": "",
+                "snippet": str(exc),
+                "content": "",
+                "source": "maxhub",
+                "platform": "xiaohongshu",
+                "media": {"query": query, "error": str(exc)},
+                "images": [],
+                "raw": {},
+            })
     if "zhihu" in platforms:
-        payload = _maxhub_get(
-            "/api/v1/zhihu/web/fetch_article_search_v3",
-            {"keyword": query, "offset": 0, "limit": max_results},
-            config,
-        )
-        records.extend(_normalize_zhihu(payload, query, max_results))
+        try:
+            payload = _maxhub_get(
+                "/api/v1/zhihu/web/fetch_article_search_v3",
+                {"keyword": query, "offset": 0, "limit": max_results},
+                config,
+            )
+            records.extend(_normalize_zhihu(payload, query, max_results))
+        except Exception as exc:  # noqa: BLE001 — surface one platform's failure, keep others
+            records.append({
+                "title": f"Zhihu search failed for {query}",
+                "url": "",
+                "snippet": str(exc),
+                "content": "",
+                "source": "maxhub",
+                "platform": "zhihu",
+                "media": {"query": query, "error": str(exc)},
+                "images": [],
+                "raw": {},
+            })
     return records
 
 
