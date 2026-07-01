@@ -27,7 +27,8 @@ cd /home/ubuntu/open_deep_research
   --maxhub-platform xiaohongshu \
   --max-concurrent-research-units 1 \
   --max-researcher-iterations 1 \
-  --max-react-tool-calls 3
+  --max-react-tool-calls 3 \
+  --xhs-ocr-max-images 3
 ```
 
 After running, inspect the printed report/raw-notes paths and cite limitations from raw notes. List previous runs with:

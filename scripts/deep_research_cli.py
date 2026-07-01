@@ -139,6 +139,12 @@ def parse_args() -> argparse.Namespace:
         help="When using --search-api wechat_sogou, also fetch mp.weixin.qq.com article bodies.",
     )
     parser.add_argument(
+        "--xhs-ocr-max-images",
+        type=int,
+        default=3,
+        help="Maximum Xiaohongshu images to OCR per evidence note in xiaohongshu_deep mode. Default: 3",
+    )
+    parser.add_argument(
         "--allow-clarification",
         action="store_true",
         help="Allow the agent to stop and ask a clarifying question.",
@@ -169,6 +175,7 @@ def build_config(args: argparse.Namespace, search_api: str) -> dict:
             "multi_source_providers": args.multi_source_provider,
             "maxhub_platforms": args.maxhub_platform or ["xiaohongshu", "zhihu"],
             "wechat_fetch_content": args.wechat_fetch_content,
+            "xhs_ocr_max_images": args.xhs_ocr_max_images,
             "summarization_model": summarization_model,
             "research_model": args.model,
             "compression_model": args.model,

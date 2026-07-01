@@ -64,7 +64,22 @@ MaxHub vertical search is available with `--search-api maxhub`. The first MVP ad
 
 Multi-source orchestration is available with `--search-api multi_source` or default `auto`. It aggregates `seeded_web`, `tavily`, `maxhub`, and `wechat_sogou` when configured. Restrict providers with repeated `--multi-source-provider`, for example `--multi-source-provider tavily --multi-source-provider maxhub`. Provider errors are included in raw notes instead of failing the whole run.
 
-Xiaohongshu deep evidence mode is available with `--search-api xiaohongshu_deep`. It searches Xiaohongshu notes through MaxHub App V2, attempts App V2 detail endpoints (`get_image_note_detail` / `get_video_note_detail`), collects image URLs, and emits an OCR status per evidence node. This host currently has no local OCR engine installed, so OCR reports `available=false` until tesseract+pytesseract/Pillow or EasyOCR is installed.
+Xiaohongshu deep evidence mode is available with `--search-api xiaohongshu_deep`. It searches Xiaohongshu notes through MaxHub App V2, attempts App V2 detail endpoints (`get_image_note_detail` / `get_video_note_detail`), collects image URLs, and emits an OCR status per evidence node. RapidOCR ONNXRuntime is installed for lightweight Chinese/English OCR. In `xiaohongshu_deep` mode the flow OCRs up to `--xhs-ocr-max-images` images per evidence note (default 3) and records per-image text, confidence scores, and errors.
+
+Example Xiaohongshu deep evidence run:
+
+```bash
+cd /home/ubuntu/open_deep_research
+.venv/bin/python scripts/deep_research_cli.py \
+  "请用小红书笔记研究某个消费趋势，保留图片 OCR 证据和来源限制。" \
+  --mode direct \
+  --search-api xiaohongshu_deep \
+  --maxhub-platform xiaohongshu \
+  --max-concurrent-research-units 1 \
+  --max-researcher-iterations 1 \
+  --max-react-tool-calls 3 \
+  --xhs-ocr-max-images 3
+```
 
 WeChat official-account article search is available with `--search-api wechat_sogou`. It uses Sogou Weixin article search (`type=2`) rather than MaxHub, parses `ul.news-list li`, resolves Sogou `/link?...` JavaScript redirect pages into real `mp.weixin.qq.com/s?...` URLs, and normalizes results to the same `title/url/snippet/content/source/platform/media/images/raw` shape. By default `content` is the Sogou snippet; `--wechat-fetch-content` attempts to fetch article bodies, but current requests-only extraction often cannot access `#js_content`, so Playwright click/session extraction remains a follow-up.
 

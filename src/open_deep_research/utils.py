@@ -7,6 +7,7 @@ import re
 import warnings
 from base64 import urlsafe_b64decode
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from urllib.parse import parse_qs, urljoin, urlparse
 from typing import Annotated, Any, Dict, List, Literal, Optional
 
@@ -640,11 +641,99 @@ def _xhs_detail_payload(note_id: str, note_type: str, record: dict[str, Any], co
     return {"error": last_error or "detail_fetch_failed"}
 
 
-def _local_ocr_status() -> dict[str, Any]:
+_RAPIDOCR_ENGINE = None
+
+
+def _local_ocr_engine_status() -> dict[str, Any]:
+    try:
+        from rapidocr_onnxruntime import RapidOCR  # noqa: PLC0415
+    except Exception as exc:  # noqa: BLE001 - optional local OCR dependency
+        return {
+            "available": False,
+            "engine": None,
+            "reason": f"rapidocr_onnxruntime is not importable: {exc}",
+        }
+    return {"available": True, "engine": "rapidocr_onnxruntime", "reason": ""}
+
+
+def _get_rapidocr_engine():
+    global _RAPIDOCR_ENGINE
+    if _RAPIDOCR_ENGINE is None:
+        from rapidocr_onnxruntime import RapidOCR  # noqa: PLC0415
+
+        _RAPIDOCR_ENGINE = RapidOCR()
+    return _RAPIDOCR_ENGINE
+
+
+def _download_ocr_image(url: str, max_bytes: int = 8_000_000) -> tuple[bytes, str]:
+    parsed_url = urlparse(url)
+    session = requests.Session()
+    if parsed_url.hostname in {"127.0.0.1", "localhost"}:
+        session.trust_env = False
+    response = session.get(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
+            "Referer": "https://www.xiaohongshu.com/",
+        },
+        timeout=20,
+        stream=True,
+    )
+    response.raise_for_status()
+    chunks: list[bytes] = []
+    total = 0
+    for chunk in response.iter_content(chunk_size=65536):
+        if not chunk:
+            continue
+        total += len(chunk)
+        if total > max_bytes:
+            raise RuntimeError(f"image exceeds OCR byte limit: {max_bytes}")
+        chunks.append(chunk)
+    suffix = Path(parsed_url.path).suffix.lower()
+    if suffix not in {".jpg", ".jpeg", ".png", ".webp", ".bmp"}:
+        content_type = response.headers.get("content-type", "").lower()
+        if "png" in content_type:
+            suffix = ".png"
+        elif "webp" in content_type:
+            suffix = ".webp"
+        elif "bmp" in content_type:
+            suffix = ".bmp"
+        else:
+            suffix = ".jpg"
+    return b"".join(chunks), suffix
+
+
+def _run_local_ocr_on_images(images: list[str], max_images: int) -> dict[str, Any]:
+    status = _local_ocr_engine_status()
+    if not status["available"]:
+        return {**status, "attempted_images": 0, "results": []}
+
+    import tempfile
+
+    engine = _get_rapidocr_engine()
+    results: list[dict[str, Any]] = []
+    for image_url in images[:max_images]:
+        image_result: dict[str, Any] = {"image": image_url, "text": [], "error": None}
+        try:
+            image_bytes, suffix = _download_ocr_image(image_url)
+            with tempfile.NamedTemporaryFile(suffix=suffix) as f:
+                f.write(image_bytes)
+                f.flush()
+                ocr_result, elapsed = engine(f.name)
+            image_result["elapsed"] = elapsed
+            for item in ocr_result or []:
+                image_result["text"].append({
+                    "text": item[1],
+                    "score": float(item[2]),
+                })
+        except Exception as exc:  # noqa: BLE001 - keep per-image OCR failures as evidence metadata
+            image_result["error"] = str(exc)
+        results.append(image_result)
     return {
-        "available": False,
-        "engine": None,
-        "reason": "No local OCR engine detected. Install tesseract plus Pillow/pytesseract or EasyOCR to enable image OCR.",
+        **status,
+        "attempted_images": len(results),
+        "max_images": max_images,
+        "results": results,
     }
 
 
@@ -653,6 +742,8 @@ def _xhs_build_evidence_record(record: dict[str, Any], config: RunnableConfig = 
     detail = _xhs_detail_payload(note_id, note_type, record, config)
     images = list(dict.fromkeys((record.get("images") or []) + _xhs_collect_images(detail)))
     content = _compact_text(record.get("content"), record.get("snippet"), detail, limit=5000)
+    max_ocr_images = int((config or {}).get("configurable", {}).get("xhs_ocr_max_images", 3))
+    ocr = _run_local_ocr_on_images(images, max_ocr_images) if images else {**_local_ocr_engine_status(), "attempted_images": 0, "results": []}
     return {
         "title": record.get("title") or "Untitled Xiaohongshu note",
         "url": record.get("url"),
@@ -663,7 +754,7 @@ def _xhs_build_evidence_record(record: dict[str, Any], config: RunnableConfig = 
         "engagement": {key: (record.get("media") or {}).get(key) for key in ["liked_count", "collected_count", "comments_count", "shared_count"]},
         "content": content,
         "images": images,
-        "ocr": _local_ocr_status(),
+        "ocr": ocr,
         "detail_endpoint": detail.get("_detail_endpoint"),
         "detail_error": detail.get("error"),
         "raw_detail": detail,
@@ -686,6 +777,9 @@ def _format_xhs_evidence(records: list[dict[str, Any]]) -> str:
         for image in (record.get("images") or [])[:12]:
             output += f"- IMAGE: {image}\n"
         output += f"OCR_STATUS: {record.get('ocr', {})}\n"
+        for ocr_item in (record.get("ocr", {}).get("results") or []):
+            for text_item in ocr_item.get("text", []):
+                output += f"- OCR_TEXT: {text_item.get('text')} ({text_item.get('score')})\n"
         output += f"CONTENT:\n{record.get('content', '')[:5000]}\n"
         output += f"NORMALIZED_EVIDENCE_RECORD:\n{record}\n"
         output += "-" * 80 + "\n\n"

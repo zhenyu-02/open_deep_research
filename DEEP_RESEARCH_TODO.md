@@ -30,7 +30,7 @@
 
 - [x] Add a MaxHub provider adapter with a normalized schema: `title`, `url`, `snippet`, `content`, `source`, `platform`, `media`, `images`, `raw`. Existing MaxHub skill docs are in `/home/ubuntu/.hermes/skills/openclaw-imports/maxhub`; `/home/ubuntu/.hermes/.env` has `MAXHUB_API_KEY`.
 - [x] Test Xiaohongshu search result shape. Web V3 search returns 410; App V2 `/api/v1/xiaohongshu/app_v2/search_notes` works and returns `data.data.items[].note`, including `images_list`.
-- [x] Build a separate Xiaohongshu note-detail/OCR flow: search notes -> fetch note detail -> collect images -> local OCR -> DeepSeek Flash quality/check pass -> Markdown evidence note. Current `xiaohongshu_deep` mode searches notes, tries App V2 detail endpoints, collects image URLs, and emits OCR availability/status; this host still needs a local OCR engine and DeepSeek Flash quality pass wiring.
+- [x] Build a separate Xiaohongshu note-detail/OCR flow: search notes -> fetch note detail -> collect images -> local OCR -> DeepSeek Flash quality/check pass -> Markdown evidence note. Current `xiaohongshu_deep` mode searches notes, tries App V2 detail endpoints, collects image URLs, and emits OCR availability/status; RapidOCR ONNXRuntime is now installed and wired; DeepSeek Flash quality/check pass remains a follow-up.
 - [x] Test Zhihu search shape. `/api/v1/zhihu/web/fetch_article_search_v3` works; results are nested under `data.data[].object` and sometimes `content_items[].object`.
 - [ ] Test Zhihu detail endpoints and add detail fetch for selected search hits.
 - [ ] Add Zhihu point/evidence extraction from detail pages.

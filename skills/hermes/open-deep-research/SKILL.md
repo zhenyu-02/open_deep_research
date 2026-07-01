@@ -45,7 +45,8 @@ cd /home/ubuntu/open_deep_research
   --maxhub-platform xiaohongshu \
   --max-concurrent-research-units 1 \
   --max-researcher-iterations 1 \
-  --max-react-tool-calls 3
+  --max-react-tool-calls 3 \
+  --xhs-ocr-max-images 3
 ```
 
 List persisted runs:
@@ -73,7 +74,7 @@ cd /home/ubuntu/open_deep_research
 
 1. Do not paste API keys into prompts or reports. Use `/home/ubuntu/.hermes/.env`.
 2. Sogou WeChat may return captcha/anti-spider pages; report that limitation rather than bypassing it.
-3. Xiaohongshu OCR is best-effort. If no local OCR engine exists, the evidence note will say OCR is unavailable.
+3. Xiaohongshu OCR uses RapidOCR ONNXRuntime and is best-effort. Per-image download or recognition errors are recorded in the evidence note.
 4. Use small `--max-react-tool-calls` for smoke runs; increase only when the model needs deeper follow-up.
 
 ## Verification Checklist

@@ -20,7 +20,8 @@ Xiaohongshu deep evidence:
 
 ```bash
 cd /home/ubuntu/open_deep_research
-.venv/bin/python scripts/deep_research_cli.py "<question>" --mode direct --search-api xiaohongshu_deep --maxhub-platform xiaohongshu --max-concurrent-research-units 1 --max-researcher-iterations 1 --max-react-tool-calls 3
+.venv/bin/python scripts/deep_research_cli.py "<question>" --mode direct --search-api xiaohongshu_deep --maxhub-platform xiaohongshu --max-concurrent-research-units 1 --max-researcher-iterations 1 --max-react-tool-calls 3 \
+  --xhs-ocr-max-images 3
 ```
 
 Run history and baseline checks:
@@ -35,5 +36,5 @@ cd /home/ubuntu/open_deep_research
 
 - `auto` resolves to `multi_source`.
 - Use repeated `--multi-source-provider` to restrict aggregation.
-- Xiaohongshu OCR is best-effort and reports `ocr_status` when local OCR is unavailable.
+- Xiaohongshu OCR uses RapidOCR ONNXRuntime and reports per-image text/confidence/errors.
 - Do not expose API keys; use environment files and wrapper credentials.
