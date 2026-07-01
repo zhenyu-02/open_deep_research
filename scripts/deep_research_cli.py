@@ -63,9 +63,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--multi-source-provider",
         action="append",
-        choices=["seeded_web", "tavily", "maxhub", "wechat_sogou", "arxiv"],
+        choices=["seeded_web", "tavily", "maxhub", "wechat_sogou", "arxiv", "cnki"],
         default=[],
         help="Provider to include when --search-api multi_source/auto is used. Can be repeated. Default: seeded_web when URLs exist plus tavily, maxhub, wechat_sogou, arxiv when usable.",
+    )
+    parser.add_argument(
+        "--cnki-enabled",
+        action="store_true",
+        default=False,
+        help="Enable CNKI (知网) academic paper search in multi_source mode. Requires Playwright. Slower due to browser automation.",
+    )
+    parser.add_argument(
+        "--xhs-deep-in-multi-source",
+        action="store_true",
+        default=True,
+        help="Run deep Xiaohongshu evidence (detail fetch + local OCR) inside multi_source mode. Default: true.",
+    )
+    parser.add_argument(
+        "--no-xhs-deep-in-multi-source",
+        action="store_false",
+        dest="xhs_deep_in_multi_source",
+        help="Disable deep Xiaohongshu evidence in multi_source mode.",
     )
     parser.add_argument(
         "--maxhub-platform",
@@ -176,6 +194,8 @@ def build_config(args: argparse.Namespace, search_api: str) -> dict:
             "maxhub_platforms": args.maxhub_platform or ["xiaohongshu", "zhihu"],
             "wechat_fetch_content": args.wechat_fetch_content,
             "xhs_ocr_max_images": args.xhs_ocr_max_images,
+            "xhs_deep_in_multi_source": args.xhs_deep_in_multi_source,
+            "cnki_enabled": args.cnki_enabled,
             "summarization_model": summarization_model,
             "research_model": args.model,
             "compression_model": args.model,

@@ -568,7 +568,7 @@ def _multi_source_default_providers(config: RunnableConfig = None) -> list[str]:
     configurable = (config or {}).get("configurable", {})
     requested = configurable.get("multi_source_providers") or []
     if requested:
-        return [provider for provider in requested if provider in {"seeded_web", "tavily", "maxhub", "wechat_sogou", "arxiv"}]
+        return [provider for provider in requested if provider in {"seeded_web", "tavily", "maxhub", "wechat_sogou", "arxiv", "cnki"}]
 
     providers: list[str] = []
     if configurable.get("source_urls"):
@@ -580,6 +580,8 @@ def _multi_source_default_providers(config: RunnableConfig = None) -> list[str]:
     providers.append("wechat_sogou")
     if not configurable.get("arxiv_disabled"):
         providers.append("arxiv")
+    if configurable.get("cnki_enabled"):
+        providers.append("cnki")
     return providers
 
 
@@ -649,6 +651,9 @@ async def multi_source_search(
             elif provider == "arxiv":
                 sections.append("## ARXIV")
                 sections.append(await arxiv_search.ainvoke({"queries": queries, "max_results": per_provider_results, "config": config}))
+            elif provider == "cnki":
+                sections.append("## CNKI")
+                sections.append(await cnki_search.ainvoke({"queries": queries, "max_results": per_provider_results, "config": config}))
         except Exception as exc:  # noqa: BLE001 - provider failures should be visible evidence metadata
             sections.append(f"## {provider.upper()} ERROR\n{exc}\n")
     return "\n\n".join(sections)
@@ -1684,6 +1689,98 @@ async def arxiv_search(
     if not all_records:
         return "No arXiv results found."
     return _format_records_output("arXiv search results", all_records, max_results * len(queries))
+
+
+
+##########################
+# CNKI Academic Paper Search (via Playwright)
+##########################
+CNKI_SEARCH_DESCRIPTION = (
+    "Search Chinese academic papers on CNKI (知网). Uses Playwright to scrape "
+    "titles, authors, abstracts, and source journals. Returns normalized records. "
+    "Slower than API-based searches due to browser automation."
+)
+
+
+def _cnki_search_sync(query: str, max_results: int) -> list[dict[str, Any]]:
+    """Search CNKI synchronously using Playwright, returning normalized records."""
+    from playwright.sync_api import sync_playwright
+
+    encoded_query = query.replace(" ", "+")
+    search_url = f"https://kns.cnki.net/kns8s/search?classid=YSTT4HG0&kw={encoded_query}"
+    records: list[dict[str, Any]] = []
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context(
+                user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                locale="zh-CN",
+            )
+            page = context.new_page()
+            page.goto(search_url, timeout=30000, wait_until="domcontentloaded")
+            # Wait for result rows to appear
+            try:
+                page.wait_for_selector("tr[data-sourcesearch]", timeout=15000)
+            except Exception:
+                pass  # Results may not have loaded; try to extract what's there
+
+            rows = page.query_selector_all("tr[data-sourcesearch]")[:max_results]
+            for row in rows:
+                title_el = row.query_selector("td.name a")
+                authors_el = row.query_selector("td.author")
+                source_el = row.query_selector("td.source")
+                abstract_el = row.query_selector("td.abstract")
+                title = (title_el.inner_text().strip() if title_el else "").replace("\n", " ")
+                authors = authors_el.inner_text().strip() if authors_el else ""
+                source = source_el.inner_text().strip() if source_el else ""
+                abstract = abstract_el.inner_text().strip()[:2000] if abstract_el else ""
+                url = title_el.get_attribute("href") if title_el else ""
+                if url and not url.startswith("http"):
+                    url = f"https://kns.cnki.net{url}"
+
+                if title:
+                    records.append({
+                        "title": title,
+                        "url": url,
+                        "snippet": f"{authors} — {source}\n{abstract}",
+                        "content": abstract or f"{authors} — {source}",
+                        "source": "cnki",
+                        "platform": "cnki",
+                        "media": {"authors": authors, "source_journal": source, "query": query},
+                        "images": [],
+                        "raw": {"title": title, "authors": authors, "source": source, "abstract": abstract},
+                    })
+            browser.close()
+    except Exception as exc:
+        return [{"title": f"CNKI search failed for {query}", "url": "", "snippet": str(exc),
+                 "content": "", "source": "cnki", "platform": "cnki",
+                 "media": {"query": query, "error": str(exc)}, "images": [], "raw": {}}]
+
+    return records
+
+
+@tool(description=CNKI_SEARCH_DESCRIPTION)
+async def cnki_search(
+    queries: List[str],
+    max_results: Annotated[int, InjectedToolArg] = 5,
+    config: RunnableConfig = None,
+) -> str:
+    """Search CNKI for Chinese academic papers matching the given queries."""
+    all_records: list[dict[str, Any]] = []
+    for query in queries:
+        try:
+            all_records.extend(await asyncio.to_thread(_cnki_search_sync, query, max_results))
+        except Exception as exc:  # noqa: BLE001
+            all_records.append({
+                "title": f"CNKI search failed for {query}",
+                "url": "", "snippet": str(exc), "content": "",
+                "source": "cnki", "platform": "cnki",
+                "media": {"query": query, "error": str(exc)}, "images": [], "raw": {},
+            })
+    if not all_records:
+        return "No CNKI results found."
+    return _format_records_output("CNKI search results", all_records, max_results * len(queries))
 
 
 ##########################
