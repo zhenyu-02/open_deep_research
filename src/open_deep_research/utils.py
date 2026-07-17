@@ -292,11 +292,16 @@ def _maxhub_get(endpoint: str, params: dict[str, Any], config: RunnableConfig = 
     api_key = _maxhub_api_key(config)
     if not api_key:
         raise ValueError("MAXHUB_API_KEY is not configured. Add it to ~/.hermes/.env.")
+    maxhub_socks_proxy = os.getenv("MAXHUB_SOCKS_PROXY", "socks5://127.0.0.1:7891")
+    proxies = None
+    if maxhub_socks_proxy:
+        proxies = {"http": maxhub_socks_proxy, "https": maxhub_socks_proxy}
     response = requests.get(
         f"{MAXHUB_BASE_URL}{endpoint}",
         params=params,
         headers={"Authorization": f"Bearer {api_key}"},
         timeout=30,
+        proxies=proxies,
     )
     response.raise_for_status()
     payload = response.json()
@@ -920,7 +925,7 @@ async def xiaohongshu_deep_search(
                 "engagement": {},
                 "content": str(exc),
                 "images": [],
-                "ocr": _local_ocr_status(),
+                "ocr": _local_ocr_engine_status(),
                 "detail_endpoint": "",
                 "detail_error": str(exc),
                 "raw_detail": {},
@@ -1658,21 +1663,19 @@ ARXIV_API_BASE = "http://export.arxiv.org/api/query"
 
 
 def _arxiv_search_sync(query: str, max_results: int) -> list[dict[str, Any]]:
-    """Search arXiv API synchronously, returning normalized records."""
-    import urllib.request
-    import urllib.parse
+    """Search arXiv API synchronously via requests (respects proxy env vars), returning normalized records."""
     import xml.etree.ElementTree as ET
 
-    params = urllib.parse.urlencode({
-        "search_query": f"all:{query}",
-        "start": 0,
-        "max_results": max_results,
-    })
-    url = f"{ARXIV_API_BASE}?{params}"
-    req = urllib.request.Request(url, headers={"User-Agent": "open-deep-research-cli/0.1"})
+    params = {"search_query": f"all:{query}", "start": 0, "max_results": max_results}
     try:
-        with urllib.request.urlopen(req, timeout=30) as response:
-            raw = response.read().decode("utf-8")
+        response = requests.get(
+            ARXIV_API_BASE,
+            params=params,
+            headers={"User-Agent": "open-deep-research-cli/0.1"},
+            timeout=15,
+        )
+        response.raise_for_status()
+        raw = response.text
     except Exception as exc:
         return [{"title": f"arXiv search failed for {query}", "url": "", "snippet": str(exc),
                  "content": "", "source": "arxiv", "platform": "arxiv", "media": {"query": query, "error": str(exc)},

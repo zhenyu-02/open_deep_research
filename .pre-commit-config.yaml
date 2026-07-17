@@ -1,0 +1,11 @@
+repos:
+  - repo: local
+    hooks:
+      - id: pytest-xhs
+        name: XHS search end-to-end tests
+        entry: bash -c '$HOME/.hermes/bin/uv run pytest tests/test_xhs_search.py -v'
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit]
+        verbose: true

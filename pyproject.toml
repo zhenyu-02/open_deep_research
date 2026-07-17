@@ -26,6 +26,7 @@ dependencies = [
     "duckduckgo-search>=3.0.0",
     "exa-py>=1.8.8",
     "requests>=2.32.3",
+    "PySocks>=1.7.1",
     "beautifulsoup4==4.14.3",
     "python-dotenv>=1.0.1",
     "pytest",
