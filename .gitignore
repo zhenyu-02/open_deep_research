@@ -68,3 +68,12 @@ tmp/
 temp/
 
 .langgraph_api
+
+# Research outputs and traces (not part of the codebase)
+research-output*.md
+demo-*.md
+output/
+traces/
+
+# Benchmarks
+.benchmarks/

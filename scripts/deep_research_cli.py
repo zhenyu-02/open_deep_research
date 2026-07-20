@@ -5,6 +5,7 @@ import argparse
 import asyncio
 import json
 import os
+import sys
 import traceback
 import uuid
 from datetime import datetime, timezone
@@ -70,14 +71,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--cnki-enabled",
         action="store_true",
-        default=True,
-        help="Enable CNKI (知网) academic paper search in multi_source mode. Enabled by default. Requires Playwright. Slower due to browser automation.",
+        default=False,
+        help="Enable CNKI (知网) academic paper search in multi_source mode. Disabled by default (requires Playwright). Slower due to browser automation.",
     )
     parser.add_argument(
-        "--no-cnki",
-        action="store_false",
+        "--cnki",
+        action="store_true",
         dest="cnki_enabled",
-        help="Disable CNKI (知网) search in multi_source mode.",
+        help="Enable CNKI (知网) search in multi_source mode. Shortcut for --cnki-enabled.",
     )
     parser.add_argument(
         "--xhs-deep-in-multi-source",
@@ -94,13 +95,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--maxhub-platform",
         action="append",
-        choices=["xiaohongshu", "zhihu"],
+        choices=["xiaohongshu", "zhihu", "bilibili", "weibo"],
         default=[],
-        help="MaxHub platform to query when --search-api maxhub is used. Can be repeated. Default: both.",
+        help="MaxHub platform to query when --search-api maxhub is used. Can be repeated. Default: xiaohongshu, zhihu, bilibili, weibo.",
     )
     parser.add_argument(
         "--model",
-        default="deepseek:deepseek-chat",
+        default="deepseek:deepseek-v4-pro",
         help="Model used for research, compression, and final report.",
     )
     parser.add_argument(
@@ -197,19 +198,19 @@ def build_config(args: argparse.Namespace, search_api: str) -> dict:
             "search_api": search_api,
             "source_urls": args.source_url,
             "multi_source_providers": args.multi_source_provider,
-            "maxhub_platforms": args.maxhub_platform or ["xiaohongshu", "zhihu"],
+            "maxhub_platforms": args.maxhub_platform or ["xiaohongshu", "zhihu", "bilibili", "weibo"],
             "wechat_fetch_content": args.wechat_fetch_content,
             "xhs_ocr_max_images": args.xhs_ocr_max_images,
             "xhs_deep_in_multi_source": args.xhs_deep_in_multi_source,
             "cnki_disabled": not args.cnki_enabled,
-            "summarization_model": summarization_model,
+            "summarization_model": "deepseek:deepseek-v4-pro",
             "research_model": args.model,
-            "compression_model": args.model,
+            "compression_model": "deepseek:deepseek-v4-pro",
             "final_report_model": args.model,
             "summarization_model_max_tokens": 4096,
-            "research_model_max_tokens": 4096,
-            "compression_model_max_tokens": 4096,
-            "final_report_model_max_tokens": 4096,
+            "research_model_max_tokens": 16384,
+            "compression_model_max_tokens": 32768,
+            "final_report_model_max_tokens": 16384,
             "max_concurrent_research_units": args.max_concurrent_research_units,
             "max_researcher_iterations": args.max_researcher_iterations,
             "max_react_tool_calls": args.max_react_tool_calls,
@@ -276,12 +277,14 @@ async def run(args: argparse.Namespace) -> dict:
 
     search_api = resolve_search_api(args)
     config = build_config(args, search_api)
+    print(f"[odr] Model: {args.model} | Search: {search_api} | Mode: {args.mode}", file=sys.stderr, flush=True)
     if args.mode == "direct":
         research_topic = (
             f"{args.question}\n\n"
             "Use the configured search/evidence tool at least once before "
             "summarizing. Include source URLs, platform labels, and evidence limitations in the synthesis."
         )
+        print(f"[odr] Starting researcher subgraph...", file=sys.stderr, flush=True)
         return await researcher_subgraph.ainvoke(
             {
                 "researcher_messages": [HumanMessage(content=research_topic)],
@@ -290,6 +293,7 @@ async def run(args: argparse.Namespace) -> dict:
             config=config,
         )
 
+    print(f"[odr] Starting full deep researcher graph...", file=sys.stderr, flush=True)
     return await deep_researcher.ainvoke(
         {"messages": [HumanMessage(content=args.question)]},
         config=config,

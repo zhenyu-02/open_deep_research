@@ -1,6 +1,8 @@
 """Main LangGraph implementation for the Deep Research agent."""
 
 import asyncio
+import sys
+import traceback
 from typing import Literal
 
 from langchain.chat_models import init_chat_model
@@ -411,8 +413,19 @@ async def researcher(state: ResearcherState, config: RunnableConfig) -> Command[
     )
     
     # Step 3: Generate researcher response with system context
+    print(f"[odr] Researcher invoking LLM ({configurable.research_model}) with {len(tools)} tools...", file=sys.stderr, flush=True)
     messages = [SystemMessage(content=researcher_prompt)] + researcher_messages
-    response = await research_model.ainvoke(messages)
+    try:
+        response = await asyncio.wait_for(
+            research_model.ainvoke(messages),
+            timeout=120.0  # 2-minute timeout for LLM calls on headless servers
+        )
+    except asyncio.TimeoutError:
+        print(f"[odr] LLM call timed out after 120s — returning partial results", file=sys.stderr, flush=True)
+        return Command(
+            goto="compress_research",
+            update={"researcher_messages": researcher_messages}
+        )
     
     # Step 4: Update state and proceed to tool execution
     return Command(
@@ -466,16 +479,24 @@ async def researcher_tools(state: ResearcherState, config: RunnableConfig) -> Co
     # Step 2: Handle other tool calls (search, MCP tools, etc.)
     tools = await get_all_tools(config)
     tools_by_name = {
-        tool.name if hasattr(tool, "name") else tool.get("name", "web_search"): tool 
+        tool.name if hasattr(tool, "name") else tool.get("name", "web_search"): tool
         for tool in tools
     }
-    
-    # Execute all tool calls in parallel
+
+    # Execute all tool calls in parallel, with graceful fallback for unknown tools
     tool_calls = most_recent_message.tool_calls
-    tool_execution_tasks = [
-        execute_tool_safely(tools_by_name[tool_call["name"]], tool_call["args"], config) 
-        for tool_call in tool_calls
-    ]
+    tool_execution_tasks = []
+    for tool_call in tool_calls:
+        tool_name = tool_call["name"]
+        if tool_name in tools_by_name:
+            tool_execution_tasks.append(
+                execute_tool_safely(tools_by_name[tool_name], tool_call["args"], config)
+            )
+        else:
+            # Model hallucinated a tool name — return an error message instead of crashing
+            async def _unknown_tool_error(name: str = tool_name, available: list[str] = list(tools_by_name.keys())):
+                return f"Error: Tool '{name}' is not available. Available tools: {available}. Please use one of the available tools or call ResearchComplete."
+            tool_execution_tasks.append(_unknown_tool_error())
     observations = await asyncio.gather(*tool_execution_tasks)
     
     # Create tool messages from execution results
@@ -534,6 +555,10 @@ async def compress_research(state: ResearcherState, config: RunnableConfig):
     # Step 2: Prepare messages for compression
     researcher_messages = state.get("researcher_messages", [])
     
+    # Debug: log message stats
+    total_chars = sum(len(str(m.content)) for m in researcher_messages)
+    print(f"[odr] Compression input: {len(researcher_messages)} messages, {total_chars} total chars", file=sys.stderr, flush=True)
+    
     # Add instruction to switch from research mode to compression mode
     researcher_messages.append(HumanMessage(content=compress_research_simple_human_message))
     
@@ -547,8 +572,12 @@ async def compress_research(state: ResearcherState, config: RunnableConfig):
             compression_prompt = compress_research_system_prompt.format(date=get_today_str())
             messages = [SystemMessage(content=compression_prompt)] + researcher_messages
             
-            # Execute compression
-            response = await synthesizer_model.ainvoke(messages)
+            # Execute compression with timeout for headless server safety
+            print(f"[odr] Compressing research...", file=sys.stderr, flush=True)
+            response = await asyncio.wait_for(
+                synthesizer_model.ainvoke(messages),
+                timeout=300.0  # 5-minute timeout for V4 Pro thinking-mode compression
+            )
             
             # Extract raw notes from all tool and AI messages
             raw_notes_content = "\n".join([
@@ -570,7 +599,9 @@ async def compress_research(state: ResearcherState, config: RunnableConfig):
                 researcher_messages = remove_up_to_last_ai_message(researcher_messages)
                 continue
             
-            # For other errors, continue retrying
+            # For other errors, log full details and retry
+            print(f"[odr] Compression error (attempt {synthesis_attempts}/{max_attempts}): type={type(e).__name__}, message={repr(e)}", file=sys.stderr, flush=True)
+            print(f"[odr] Compression traceback:\n{traceback.format_exc()}", file=sys.stderr, flush=True)
             continue
     
     # Step 4: Return error result if all attempts failed

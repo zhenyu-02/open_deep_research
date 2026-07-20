@@ -261,7 +261,7 @@ async def seeded_web_search(
 MAXHUB_SEARCH_DESCRIPTION = (
     "Search Chinese vertical sources through MaxHub and return normalized "
     "records with title/url/snippet/content/source/platform/media/images/raw. "
-    "The MVP supports Xiaohongshu notes and Zhihu article/question search."
+    "Supports Xiaohongshu, Zhihu, Bilibili, and Weibo."
 )
 MAXHUB_BASE_URL = "https://www.aconfig.cn"
 
@@ -296,11 +296,13 @@ def _maxhub_get(endpoint: str, params: dict[str, Any], config: RunnableConfig = 
     proxies = None
     if maxhub_socks_proxy:
         proxies = {"http": maxhub_socks_proxy, "https": maxhub_socks_proxy}
+    # Use a shorter connect timeout (10s) + read timeout (30s) so headless servers
+    # with unreachable proxies don't hang indefinitely.
     response = requests.get(
         f"{MAXHUB_BASE_URL}{endpoint}",
         params=params,
         headers={"Authorization": f"Bearer {api_key}"},
-        timeout=30,
+        timeout=(10, 30),
         proxies=proxies,
     )
     response.raise_for_status()
@@ -434,6 +436,83 @@ def _normalize_zhihu(payload: dict[str, Any], query: str, limit: int) -> list[di
     return normalized[:limit]
 
 
+def _normalize_bilibili(payload: dict[str, Any], query: str, limit: int) -> list[dict[str, Any]]:
+    """Normalize Bilibili general search results."""
+    items = payload.get("data", {}).get("data", {}).get("result", [])
+    normalized = []
+    for item in (items or [])[:limit]:
+        if not isinstance(item, dict):
+            continue
+        title = _strip_html(item.get("title") or item.get("name"))
+        description = _strip_html(item.get("description") or "")
+        snippet = _compact_text(description, item.get("tag"))
+        url = item.get("arcurl") or f"https://www.bilibili.com/video/{item.get('bvid', '')}"
+        if not url:
+            continue
+        normalized.append({
+            "title": title or "Untitled Bilibili result",
+            "url": url,
+            "snippet": snippet or title,
+            "content": description,
+            "source": "maxhub",
+            "platform": "bilibili",
+            "media": {
+                "type": item.get("type") or "video",
+                "author": item.get("author"),
+                "author_id": str(item.get("mid", "")),
+                "play_count": item.get("play"),
+                "favorites_count": item.get("favorites"),
+                "review_count": item.get("review"),
+                "duration": item.get("duration"),
+                "pubdate": item.get("pubdate"),
+                "query": query,
+            },
+            "images": [],
+            "raw": item,
+        })
+    return normalized
+
+
+def _normalize_weibo(payload: dict[str, Any], query: str, limit: int) -> list[dict[str, Any]]:
+    """Normalize Weibo realtime search results."""
+    items = payload.get("data", {}).get("parsed_data", {}).get("results", [])
+    normalized = []
+    for item in (items or [])[:limit]:
+        if not isinstance(item, dict):
+            continue
+        content = _strip_html(item.get("content") or "")
+        user_name = _strip_html(item.get("user_name") or item.get("user_nick") or "")
+        url = item.get("post_url") or ""
+        if url and not url.startswith("http"):
+            url = f"https:{url}" if url.startswith("//") else f"https://weibo.com/{url.lstrip('/')}"
+        interaction = item.get("interaction", {}) or {}
+        media_info = item.get("media", {}) or {}
+        images = list(media_info.get("images") or [])
+        normalized.append({
+            "title": content[:80] or f"微博 @{user_name}",
+            "url": url,
+            "snippet": content[:600],
+            "content": content,
+            "source": "maxhub",
+            "platform": "weibo",
+            "media": {
+                "type": item.get("weibo_type") or "weibo",
+                "author": user_name,
+                "author_id": item.get("user_url") or "",
+                "publish_time": item.get("publish_time"),
+                "repost_count": interaction.get("repost_count"),
+                "comment_count": interaction.get("comment_count"),
+                "like_count": interaction.get("like_count"),
+                "has_image": media_info.get("has_image"),
+                "has_video": media_info.get("has_video"),
+                "query": query,
+            },
+            "images": images,
+            "raw": item,
+        })
+    return normalized
+
+
 def _maxhub_search_sync(query: str, platforms: list[str], max_results: int, config: RunnableConfig = None) -> list[dict[str, Any]]:
     """Search MaxHub platforms independently — one platform failure does not discard results from others."""
     records: list[dict[str, Any]] = []
@@ -477,6 +556,46 @@ def _maxhub_search_sync(query: str, platforms: list[str], max_results: int, conf
                 "images": [],
                 "raw": {},
             })
+    if "bilibili" in platforms:
+        try:
+            payload = _maxhub_get(
+                "/api/v1/bilibili/web/fetch_general_search",
+                {"keyword": query, "order": "totalrank", "page": 1, "page_size": max_results},
+                config,
+            )
+            records.extend(_normalize_bilibili(payload, query, max_results))
+        except Exception as exc:  # noqa: BLE001 — surface one platform's failure, keep others
+            records.append({
+                "title": f"Bilibili search failed for {query}",
+                "url": "",
+                "snippet": str(exc),
+                "content": "",
+                "source": "maxhub",
+                "platform": "bilibili",
+                "media": {"query": query, "error": str(exc)},
+                "images": [],
+                "raw": {},
+            })
+    if "weibo" in platforms:
+        try:
+            payload = _maxhub_get(
+                "/api/v1/weibo/web_v2/fetch_realtime_search",
+                {"query": query, "page": 1},
+                config,
+            )
+            records.extend(_normalize_weibo(payload, query, max_results))
+        except Exception as exc:  # noqa: BLE001 — surface one platform's failure, keep others
+            records.append({
+                "title": f"Weibo search failed for {query}",
+                "url": "",
+                "snippet": str(exc),
+                "content": "",
+                "source": "maxhub",
+                "platform": "weibo",
+                "media": {"query": query, "error": str(exc)},
+                "images": [],
+                "raw": {},
+            })
     return records
 
 
@@ -490,10 +609,12 @@ async def maxhub_search(
     platforms = (config or {}).get("configurable", {}).get("maxhub_platforms") or [
         "xiaohongshu",
         "zhihu",
+        "bilibili",
+        "weibo",
     ]
-    valid_platforms = [p for p in platforms if p in {"xiaohongshu", "zhihu"}]
+    valid_platforms = [p for p in platforms if p in {"xiaohongshu", "zhihu", "bilibili", "weibo"}]
     if not valid_platforms:
-        return "No valid MaxHub platforms configured. Use xiaohongshu and/or zhihu."
+        return "No valid MaxHub platforms configured. Use xiaohongshu, zhihu, bilibili, and/or weibo."
 
     all_records = []
     for query in queries:
@@ -659,7 +780,7 @@ async def multi_source_search(
             elif provider == "maxhub":
                 sections.append("## MAXHUB")
                 records: list[dict[str, Any]] = []
-                platforms = (config or {}).get("configurable", {}).get("maxhub_platforms") or ["xiaohongshu", "zhihu"]
+                platforms = (config or {}).get("configurable", {}).get("maxhub_platforms") or ["xiaohongshu", "zhihu", "bilibili", "weibo"]
                 for query in provider_queries:
                     records.extend(await asyncio.to_thread(_maxhub_search_sync, query, platforms, per_provider_results, config))
                 sections.append(_format_records_output("MaxHub normalized search results", records, per_provider_results * len(queries) * max(1, len(platforms))))
@@ -1208,11 +1329,20 @@ async def tavily_search(
     
     # Initialize summarization model with retry logic
     model_api_key = get_api_key_for_model(configurable.summarization_model, config)
+
+    # DeepSeek V4 Pro in thinking mode (default) does not support tool_choice
+    # which LangChain's with_structured_output uses internally.
+    # Disable thinking mode for summarization to allow structured output.
+    model_kwargs = {}
+    if "deepseek" in (configurable.summarization_model or "").lower():
+        model_kwargs = {"extra_body": {"thinking": {"type": "disabled"}}}
+
     summarization_model = init_chat_model(
         model=configurable.summarization_model,
         max_tokens=configurable.summarization_model_max_tokens,
         api_key=model_api_key,
-        tags=["langsmith:nostream"]
+        tags=["langsmith:nostream"],
+        model_kwargs=model_kwargs,
     ).with_structured_output(Summary).with_retry(
         stop_after_attempt=configurable.max_structured_output_retries
     )
