@@ -694,7 +694,7 @@ def _multi_source_default_providers(config: RunnableConfig = None) -> list[str]:
     configurable = (config or {}).get("configurable", {})
     requested = configurable.get("multi_source_providers") or []
     if requested:
-        return [provider for provider in requested if provider in {"seeded_web", "tavily", "maxhub", "wechat_sogou", "arxiv", "cnki"}]
+        return [provider for provider in requested if provider in {"seeded_web", "tavily", "maxhub", "wechat_sogou", "arxiv", "cnki", "semantic_scholar", "openalex"}]
 
     providers: list[str] = []
     if configurable.get("source_urls"):
@@ -709,6 +709,10 @@ def _multi_source_default_providers(config: RunnableConfig = None) -> list[str]:
     # CNKI is enabled by default; set cnki_disabled to opt out
     if not configurable.get("cnki_disabled"):
         providers.append("cnki")
+    if not configurable.get("semantic_scholar_disabled"):
+        providers.append("semantic_scholar")
+    if not configurable.get("openalex_disabled"):
+        providers.append("openalex")
     return providers
 
 
@@ -748,7 +752,7 @@ def _filter_queries_for_provider(queries: list[str], provider: str) -> list[str]
     if provider in ("maxhub", "wechat_sogou", "cnki"):
         cjk = [q for q in queries if _query_has_cjk(q)]
         return cjk if cjk else queries  # fallback: try all
-    if provider == "arxiv":
+    if provider in ("arxiv", "semantic_scholar", "openalex"):
         en = [q for q in queries if not _query_has_cjk(q)]
         return en if en else queries  # fallback: try all (may match English metadata)
     # tavily, seeded_web — bilingual, pass all
@@ -825,6 +829,12 @@ async def multi_source_search(
             elif provider == "cnki":
                 sections.append("## CNKI")
                 sections.append(await cnki_search.ainvoke({"queries": provider_queries, "max_results": per_provider_results, "config": config}))
+            elif provider == "semantic_scholar":
+                sections.append("## SEMANTIC SCHOLAR")
+                sections.append(await semantic_scholar_search.ainvoke({"queries": provider_queries, "max_results": per_provider_results, "config": config}))
+            elif provider == "openalex":
+                sections.append("## OPENALEX")
+                sections.append(await openalex_search.ainvoke({"queries": provider_queries, "max_results": per_provider_results, "config": config}))
         except Exception as exc:  # noqa: BLE001 - provider failures should be visible evidence metadata
             sections.append(f"## {provider.upper()} ERROR\n{exc}\n")
     return "\n\n".join(sections)
@@ -1959,6 +1969,255 @@ async def cnki_search(
     if not all_records:
         return "No CNKI results found."
     return _format_records_output("CNKI search results", all_records, max_results * len(queries))
+
+
+
+##########################
+# Semantic Scholar Academic Paper Search (Free API, AI-powered relevance)
+##########################
+SEMANTIC_SCHOLAR_SEARCH_DESCRIPTION = (
+    "Search academic papers via Semantic Scholar (200M+ papers). Returns title, "
+    "authors, abstract, year, citation count, TLDR (AI-generated one-sentence summary), "
+    "and open access PDF links when available. Powered by Allen AI. "
+    "Best for English-language academic literature discovery with AI relevance ranking. "
+    "Set SEMANTIC_SCHOLAR_API_KEY env var for higher rate limits (free key at semanticscholar.org)."
+)
+
+SEMANTIC_SCHOLAR_API_BASE = "https://api.semanticscholar.org/graph/v1"
+
+
+def _semantic_scholar_abstract_from_api(paper: dict) -> str:
+    """Extract abstract from Semantic Scholar API response."""
+    abstract = paper.get("abstract") or ""
+    if abstract:
+        return abstract[:2000]
+    tldr = paper.get("tldr")
+    if tldr and tldr.get("text"):
+        return tldr["text"]
+    return ""
+
+
+def _semantic_scholar_search_sync(query: str, max_results: int, api_key: str | None = None) -> list[dict[str, Any]]:
+    """Search Semantic Scholar API synchronously, returning normalized records."""
+    import time
+
+    fields = "title,year,authors,abstract,tldr,citationCount,openAccessPdf,externalIds,publicationVenue"
+    headers = {"User-Agent": "open-deep-research/0.1"}
+    if api_key:
+        headers["x-api-key"] = api_key
+
+    params = {"query": query, "limit": max_results, "fields": fields}
+    max_retries = 2 if api_key else 1
+    for attempt in range(max_retries):
+        try:
+            response = requests.get(
+                f"{SEMANTIC_SCHOLAR_API_BASE}/paper/search",
+                params=params,
+                headers=headers,
+                timeout=15,
+            )
+            if response.status_code == 429:
+                if not api_key:
+                    # Without API key, rate limit is very strict (100/5min). Fail fast.
+                    return [{"title": f"Semantic Scholar rate limited (429) for {query}",
+                             "url": "", "snippet": "Rate limited. Get a free API key at https://www.semanticscholar.org/product/api for 1 req/s.", "content": "",
+                             "source": "semantic_scholar", "platform": "semantic_scholar",
+                             "media": {"query": query, "error": "429 rate limited"}, "images": [], "raw": {}}]
+                wait = min((attempt + 1) * 3, 15)
+                time.sleep(wait)
+                continue
+            response.raise_for_status()
+            data = response.json()
+            break
+        except Exception as exc:
+            if attempt == max_retries - 1:
+                return [{"title": f"Semantic Scholar search failed for {query}",
+                         "url": "", "snippet": str(exc), "content": "",
+                         "source": "semantic_scholar", "platform": "semantic_scholar",
+                         "media": {"query": query, "error": str(exc)}, "images": [], "raw": {}}]
+            time.sleep(1)
+
+    records: list[dict[str, Any]] = []
+    for paper in data.get("data", [])[:max_results]:
+        title = (paper.get("title") or "Untitled").strip()
+        authors_list = [a.get("name", "") for a in paper.get("authors", [])]
+        authors = ", ".join(authors_list)
+        year = paper.get("year") or ""
+        venue = (paper.get("publicationVenue") or {}).get("name", "") if paper.get("publicationVenue") else ""
+        source_info = f"{authors} ({year})" + (f" — {venue}" if venue else "")
+        abstract = _semantic_scholar_abstract_from_api(paper)
+        tldr = paper.get("tldr", {})
+        tldr_text = (tldr.get("text") or "") if tldr else ""
+        pdf_url = (paper.get("openAccessPdf") or {}).get("url", "") if paper.get("openAccessPdf") else ""
+        external_ids = paper.get("externalIds", {}) or {}
+        doi = external_ids.get("DOI", "")
+        url = pdf_url or (f"https://doi.org/{doi}" if doi else f"https://api.semanticscholar.org/CorpusID:{paper.get('paperId','')}")
+
+        records.append({
+            "title": title,
+            "url": url,
+            "snippet": tldr_text or (abstract[:300] if abstract else source_info),
+            "content": abstract or tldr_text or source_info,
+            "source": "semantic_scholar",
+            "platform": "semantic_scholar",
+            "media": {
+                "authors": authors_list,
+                "year": year,
+                "citation_count": paper.get("citationCount"),
+                "venue": venue,
+                "doi": doi,
+                "tldr": tldr_text,
+                "query": query,
+            },
+            "images": [],
+            "raw": paper,
+        })
+    return records
+
+
+##########################
+# OpenAlex Academic Paper Search (Free, largest open index — 250M+ works)
+##########################
+OPENALEX_SEARCH_DESCRIPTION = (
+    "Search academic papers via OpenAlex (250M+ scholarly works). Returns title, "
+    "authors, abstract, year, citation count, open access status/URL, DOI, and "
+    "journal/venue info. Covers all disciplines. Free, no API key required. "
+    "Sorts by citation count by default for high-impact discovery."
+)
+
+OPENALEX_API_BASE = "https://api.openalex.org"
+
+
+def _openalex_abstract_reconstruct(paper: dict) -> str:
+    """Reconstruct abstract from OpenAlex inverted index format."""
+    abs_idx = paper.get("abstract_inverted_index")
+    if not abs_idx or not isinstance(abs_idx, dict):
+        return ""
+    try:
+        max_pos = max(max(positions) for positions in abs_idx.values())
+        words = [""] * (max_pos + 1)
+        for word, positions in abs_idx.items():
+            for pos in positions:
+                words[pos] = word
+        return " ".join(words)[:3000]
+    except (ValueError, TypeError):
+        return ""
+
+
+def _openalex_search_sync(query: str, max_results: int, mailto: str = "") -> list[dict[str, Any]]:
+    """Search OpenAlex API synchronously, returning normalized records."""
+    headers = {"User-Agent": f"mailto:{mailto}" if mailto else "open-deep-research/0.1"}
+    params = {
+        "search": query,
+        "per_page": max_results,
+        "sort": "publication_date:desc",
+        "filter": "type:article,has_abstract:true",
+    }
+    try:
+        response = requests.get(
+            f"{OPENALEX_API_BASE}/works",
+            params=params,
+            headers=headers,
+            timeout=15,
+        )
+        response.raise_for_status()
+        data = response.json()
+    except Exception as exc:
+        return [{"title": f"OpenAlex search failed for {query}",
+                 "url": "", "snippet": str(exc), "content": "",
+                 "source": "openalex", "platform": "openalex",
+                 "media": {"query": query, "error": str(exc)}, "images": [], "raw": {}}]
+
+    records: list[dict[str, Any]] = []
+    for paper in data.get("results", [])[:max_results]:
+        title = (paper.get("title") or "Untitled").strip()
+        abstract = _openalex_abstract_reconstruct(paper)
+        authorships = paper.get("authorships", []) or []
+        authors = ", ".join([a.get("author", {}).get("display_name", "") for a in authorships[:5]])
+        year = paper.get("publication_year", "")
+        cited = paper.get("cited_by_count", 0)
+        doi = (paper.get("doi") or "").removeprefix("https://doi.org/")
+        oa_info = paper.get("open_access", {}) or {}
+        oa_url = oa_info.get("oa_url", "")
+        oa_status = oa_info.get("oa_status", "")
+        source_info = f"{authors} ({year}) — Cited {cited} times" + (f" [{oa_status.upper()} OA]" if oa_status else "")
+        loc = (paper.get("primary_location") or {}).get("source", {}) or {}
+        journal = loc.get("display_name", "")
+
+        records.append({
+            "title": title,
+            "url": oa_url or (f"https://doi.org/{doi}" if doi else ""),
+            "snippet": abstract[:300] if abstract else source_info,
+            "content": abstract or source_info,
+            "source": "openalex",
+            "platform": "openalex",
+            "media": {
+                "authors": authors,
+                "year": year,
+                "citation_count": cited,
+                "doi": doi,
+                "journal": journal,
+                "oa_status": oa_status,
+                "oa_url": oa_url,
+                "query": query,
+            },
+            "images": [],
+            "raw": paper,
+        })
+    return records
+
+
+@tool(description=SEMANTIC_SCHOLAR_SEARCH_DESCRIPTION)
+async def semantic_scholar_search(
+    queries: List[str],
+    max_results: Annotated[int, InjectedToolArg] = 5,
+    config: RunnableConfig = None,
+) -> str:
+    """Search Semantic Scholar for academic papers matching the given queries."""
+    api_key = os.getenv("SEMANTIC_SCHOLAR_API_KEY", "")
+    all_records: list[dict[str, Any]] = []
+    for query in queries:
+        try:
+            all_records.extend(
+                await asyncio.to_thread(_semantic_scholar_search_sync, query, max_results, api_key or None)
+            )
+        except Exception as exc:
+            all_records.append({
+                "title": f"Semantic Scholar search failed for {query}",
+                "url": "", "snippet": str(exc), "content": "",
+                "source": "semantic_scholar", "platform": "semantic_scholar",
+                "media": {"query": query, "error": str(exc)}, "images": [], "raw": {},
+            })
+    if not all_records:
+        return "No Semantic Scholar results found."
+    return _format_records_output("Semantic Scholar search results", all_records, max_results * len(queries))
+
+
+@tool(description=OPENALEX_SEARCH_DESCRIPTION)
+async def openalex_search(
+    queries: List[str],
+    max_results: Annotated[int, InjectedToolArg] = 5,
+    config: RunnableConfig = None,
+) -> str:
+    """Search OpenAlex for academic papers matching the given queries."""
+    mailto = os.getenv("OPENALEX_MAILTO", "")
+    all_records: list[dict[str, Any]] = []
+    for query in queries:
+        try:
+            all_records.extend(
+                await asyncio.to_thread(_openalex_search_sync, query, max_results, mailto)
+            )
+        except Exception as exc:
+            all_records.append({
+                "title": f"OpenAlex search failed for {query}",
+                "url": "", "snippet": str(exc), "content": "",
+                "source": "openalex", "platform": "openalex",
+                "media": {"query": query, "error": str(exc)}, "images": [], "raw": {},
+            })
+    if not all_records:
+        return "No OpenAlex results found."
+    return _format_records_output("OpenAlex search results", all_records, max_results * len(queries))
+
 
 
 ##########################
